@@ -1,0 +1,23 @@
+PODS:
+  - Flutter (1.0.0)
+  - Herald (2.2.0)
+
+DEPENDENCIES:
+  - Flutter (from `Flutter`)
+  - Herald (~> 2.2.0)
+
+SPEC REPOS:
+  trunk:
+    - Herald
+
+EXTERNAL SOURCES:
+  Flutter:
+    :path: Flutter
+
+SPEC CHECKSUMS:
+  Flutter: cabc95a1d2626b1b06e7179b784ebcf0c0cde467
+  Herald: 8b95729058a3832b61a007626d6cf05d8fa5d6b3
+
+PODFILE CHECKSUM: 7aa79e09231731cec3f58e7620a4f872b591e953
+
+COCOAPODS: 1.16.2

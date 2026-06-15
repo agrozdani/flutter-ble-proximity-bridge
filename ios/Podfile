@@ -1,0 +1,94 @@
+# Herald's CocoaPods release targets modern iOS; 15.5 matches the deployment
+# target set in the Xcode project.
+platform :ios, '15.5'
+
+# CocoaPods analytics sends network stats synchronously affecting flutter build latency.
+ENV['COCOAPODS_DISABLE_STATS'] = 'true'
+
+project 'Runner', {
+  'Debug' => :debug,
+  'Profile' => :release,
+  'Release' => :release,
+}
+
+def flutter_root
+  generated_xcode_build_settings_path = File.expand_path(File.join('..', 'Flutter', 'Generated.xcconfig'), __FILE__)
+  unless File.exist?(generated_xcode_build_settings_path)
+    raise "#{generated_xcode_build_settings_path} must exist. If you're running pod install manually, make sure flutter pub get is executed first"
+  end
+
+  File.foreach(generated_xcode_build_settings_path) do |line|
+    matches = line.match(/FLUTTER_ROOT\=(.*)/)
+    return matches[1].strip if matches
+  end
+  raise "FLUTTER_ROOT not found in #{generated_xcode_build_settings_path}. Try deleting Generated.xcconfig, then run flutter pub get"
+end
+
+require File.expand_path(File.join('packages', 'flutter_tools', 'bin', 'podhelper'), flutter_root)
+
+flutter_ios_podfile_setup
+
+target 'Runner' do
+  use_frameworks!
+
+  # Herald handles BLE scanning, advertising, and payload exchange.
+  # https://heraldprox.io — Apache 2.0.
+  pod 'Herald', '~> 2.2.0'
+
+  flutter_install_all_ios_pods File.dirname(File.realpath(__FILE__))
+  target 'RunnerTests' do
+    inherit! :search_paths
+  end
+end
+
+post_install do |installer|
+  installer.pods_project.targets.each do |target|
+    flutter_additional_ios_build_settings(target)
+  end
+  patch_herald_for_swift6(installer)
+end
+
+# Herald 2.2.0 ships a statistics routine whose compound expressions exceed
+# the Swift 6.3+ (Xcode 26) type-checker budget: "the compiler is unable to
+# type-check this expression in reasonable time". This decomposes the two
+# offending statements into sub-expressions — the math is unchanged.
+# Idempotent: a no-op once patched or if Herald changes the source.
+def patch_herald_for_swift6(installer)
+  file = File.join(installer.sandbox.root, 'Herald', 'Herald', 'Herald',
+                   'Sensor', 'Analysis', 'SampleStatistics.swift')
+  return unless File.exist?(file)
+
+  original = <<-SWIFT
+        combined.m3 = m3 + sample.m3
+                + delta3 * Double(n * sample.n * (n - sample.n)) / Double(combined.n * combined.n)
+        combined.m3 = combined.m3 + 3.0 * delta * (Double(n) * sample.m2 - Double(sample.n) * m2) / Double(combined.n)
+        combined.m4 = m4 + sample.m4 + delta4 * Double(n * sample.n
+                * (n * n - n * sample.n + sample.n * sample.n)) / Double(combined.n * combined.n * combined.n)
+        combined.m4 = combined.m4 + 6.0 * delta2 * (Double(n * n) * sample.m2 + Double(sample.n * sample.n) * m2)
+                / Double(combined.n * combined.n) + 4.0 * delta * (Double(n) * sample.m3 - Double(sample.n) * m3) / Double(combined.n)
+  SWIFT
+
+  replacement = <<-SWIFT
+        // Patched by Podfile post_install: decomposed into sub-expressions so
+        // the Swift 6.3+ type checker can handle them (math is unchanged).
+        let nA: Int64 = n
+        let nB: Int64 = sample.n
+        let nC: Int64 = combined.n
+        let m3Num: Int64 = nA * nB * (nA - nB)
+        combined.m3 = m3 + sample.m3
+        combined.m3 += delta3 * Double(m3Num) / Double(nC * nC)
+        combined.m3 += 3.0 * delta * (Double(nA) * sample.m2 - Double(nB) * m2) / Double(nC)
+        let m4Num: Int64 = nA * nB * (nA * nA - nA * nB + nB * nB)
+        combined.m4 = m4 + sample.m4
+        combined.m4 += delta4 * Double(m4Num) / Double(nC * nC * nC)
+        let m4Cross: Double = Double(nA * nA) * sample.m2 + Double(nB * nB) * m2
+        combined.m4 += 6.0 * delta2 * m4Cross / Double(nC * nC)
+        combined.m4 += 4.0 * delta * (Double(nA) * sample.m3 - Double(nB) * m3) / Double(nC)
+  SWIFT
+
+  source = File.read(file)
+  return unless source.include?(original)
+
+  File.write(file, source.sub(original, replacement))
+  Pod::UI.puts 'Patched Herald SampleStatistics.swift for Swift 6.3+ type checking'
+end
