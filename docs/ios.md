@@ -73,10 +73,11 @@ Herald delivers `SensorDelegate` callbacks on its own dispatch queues.
 The controller:
 
 1. decodes and estimates on the callback queue,
-2. reads the sink under `NSLock` (it can be detached by `onCancel` at any
-   moment),
-3. hops to `DispatchQueue.main` for the actual `sink(event)` call — Flutter
-   requires sink invocations on the platform thread.
+2. hops to `DispatchQueue.main` — Flutter requires sink invocations on the
+   platform thread,
+3. on the main thread, reads the sink under `NSLock` right before calling
+   it — `onCancel` can detach the sink while the hop is still queued, and a
+   detached sink must not be invoked.
 
 ## The single long-lived Herald host
 

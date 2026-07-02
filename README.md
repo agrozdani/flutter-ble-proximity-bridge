@@ -295,7 +295,7 @@ treatment, including the ordering analysis, is in
 
 | Platform | Minimum OS | Real BLE? | Runs mock mode? |
 |---|---|---|---|
-| Android phone | 7.0 (API 24, required by Herald) | ✅ yes | ✅ yes |
+| Android phone | 7.0 (API 24, this app's `minSdk`; Herald itself supports API 21+) | ✅ yes | ✅ yes |
 | Android emulator | — | ❌ no BLE radio | ✅ yes |
 | iPhone | iOS 15.5+ | ✅ yes | ✅ yes |
 | iOS simulator | — | ❌ no Bluetooth at all | ✅ yes |
@@ -407,7 +407,8 @@ radio:
 - [`bridge_controller_test.dart`](test/bridge_controller_test.dart) drives the
   full Dart half end to end with the native side faked: the start sequence
   (subscribe → start → await ready → push status), peer ingestion, the immediate
-  goodbye path, clean stop/restart, and a rejected start.
+  goodbye path, clean stop/restart, a rejected start, and an event stream that
+  errors mid-handshake.
 - [`bridge_event_test.dart`](test/bridge_event_test.dart) covers event decoding
   and the codec edge cases — including a whole-number `double` arriving from
   native as an `int` and being widened back.

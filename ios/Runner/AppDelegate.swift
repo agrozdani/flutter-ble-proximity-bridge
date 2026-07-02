@@ -108,7 +108,11 @@ import os.log
       result(FlutterError(code: "bad_args", message: "updateStatus requires status and color", details: nil))
       return
     }
-    guard let supplier = ProximityController.shared.payloadSupplier else {
+    // Gate on isRunning, not just on the supplier: the supplier stays warm
+    // across logical stops so lingering peers can read the offline payload,
+    // but updateStatus is only valid while a source runs.
+    let controller = ProximityController.shared
+    guard controller.isRunning, let supplier = controller.payloadSupplier else {
       result(FlutterError(code: "not_running", message: "updateStatus requires a running bridge", details: nil))
       return
     }
