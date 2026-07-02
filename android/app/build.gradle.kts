@@ -16,7 +16,8 @@ android {
 
     defaultConfig {
         applicationId = "com.example.ble_proximity_bridge"
-        // Herald requires API 24+.
+        // Herald supports API 21+; 24 is Flutter's current default minimum,
+        // pinned here so the floor doesn't drift with the Flutter version.
         minSdk = maxOf(24, flutter.minSdkVersion)
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode

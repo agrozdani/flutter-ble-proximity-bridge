@@ -154,7 +154,7 @@ Three safety nets back this up, in order of speed:
 |---|---|---|
 | Goodbye/hello frame | Peers with live connections (the ghost case) | instant |
 | Offline flag in payload re-reads | Peers that missed the frame | ≤ 15 s (`payloadDataUpdateTimeInterval`) |
-| Dart staleness eviction | Peers that crashed / walked away and never said goodbye | ≤ 20 s |
+| Dart staleness eviction | Peers that crashed / walked away and never said goodbye | 20 s threshold, swept every 5 s |
 
 ## Lifecycle
 

@@ -33,7 +33,9 @@ reserves for Bluetooth interactions:
   user swipes the app away. The in-app Stop button (or Android reclaiming
   resources) ends it.
 - After a `START_STICKY` restart the intent is null; the service stays up
-  but idle, and Dart re-issues `start` on next app resume.
+  but idle. The restarted process has no Flutter engine attached, so nothing
+  restarts scanning automatically — the bridge resumes when the user opens
+  the app and starts it again.
 
 **Mock mode runs in the same service but skips foreground promotion** — the
 `connectedDevice` type requires Bluetooth permissions that the mock path

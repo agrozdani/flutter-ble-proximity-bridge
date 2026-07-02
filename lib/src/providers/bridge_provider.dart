@@ -79,6 +79,9 @@ class BridgeController extends Notifier<BridgeState> {
     // covered from both ends.
     final ready = Completer<void>();
     _ready = ready;
+    // The stream can error before the await below is reached; don't let
+    // that surface as an unhandled error in the gap.
+    ready.future.ignore();
     await _subscription?.cancel();
     _subscription = ref
         .read(eventChannelProvider)
@@ -104,6 +107,8 @@ class BridgeController extends Notifier<BridgeState> {
           .read(methodChannelProvider)
           .updateStatus(status: status.status.code, color: status.colorIndex);
 
+      // A concurrent stop() means idle was requested; stay there.
+      if (!_startRequested) return;
       state = BridgeState(
         phase: BridgePhase.running,
         mockMode: mock,
@@ -111,6 +116,9 @@ class BridgeController extends Notifier<BridgeState> {
       );
     } on Exception catch (e) {
       await _teardown();
+      // A concurrent stop() means idle was requested; don't overwrite it
+      // with the error from the start it cancelled.
+      if (!_startRequested) return;
       state = BridgeState(
         phase: BridgePhase.error,
         mockMode: mock,
@@ -141,6 +149,13 @@ class BridgeController extends Notifier<BridgeState> {
   }
 
   void _onStreamError(Object error) {
+    // If the handshake is still pending, fail it now instead of letting
+    // the ready wait run out its timeout; start()'s catch sets the state.
+    final ready = _ready;
+    if (ready != null && !ready.isCompleted) {
+      ready.completeError(error is Exception ? error : Exception('$error'));
+      return;
+    }
     state = BridgeState(
       phase: BridgePhase.error,
       mockMode: state.mockMode,

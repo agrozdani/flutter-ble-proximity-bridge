@@ -41,12 +41,28 @@ final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler 
   private var bleHostSessionId: String?
 
   private var mockSource: MockPeerSource?
-  private var sourceMode: SourceMode = .idle
   private var pendingQuiesce: DispatchWorkItem?
 
+  // Written on the main thread, read from Herald's callback queues, so
+  // access goes through a lock — same discipline as the event sink.
+  private let stateLock = NSLock()
+  private var _sourceMode: SourceMode = .idle
+  private var sourceMode: SourceMode {
+    get {
+      stateLock.lock()
+      defer { stateLock.unlock() }
+      return _sourceMode
+    }
+    set {
+      stateLock.lock()
+      defer { stateLock.unlock() }
+      _sourceMode = newValue
+    }
+  }
+
   // Herald calls us on its own queues, and Flutter sinks are main-thread
-  // only and can be detached by onCancel at any time. So: read the sink
-  // under the lock, then hop to the main queue.
+  // only and can be detached by onCancel at any time. So: hop to the main
+  // queue, then read the sink under the lock right before invoking it.
   private var eventSink: FlutterEventSink?
   private let sinkLock = NSLock()
 
@@ -54,7 +70,8 @@ final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler 
     super.init()
   }
 
-  private var isSourceRunning: Bool {
+  /// True while a source (BLE or mock) is logically running.
+  var isRunning: Bool {
     sourceMode != .idle
   }
 
@@ -72,6 +89,15 @@ final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler 
       // A cancelled stop may have left the host running, so always quiesce.
       // No-op when there's no host.
       quiesceBleHost()
+      // Mock mode has no transport, but the supplier still holds the status
+      // this device broadcasts so updateStatus keeps working. Reuse the BLE
+      // host's supplier if one exists — the host keeps serving whatever
+      // supplier it was built with.
+      if let supplier = payloadSupplier {
+        supplier.updatePeerId(peerId)
+      } else {
+        payloadSupplier = StatusPayloadSupplier(peerId: peerId)
+      }
       startMockSource()
     } else {
       startOrResumeBleHost(sessionId: sessionId, peerId: peerId)
@@ -283,13 +309,14 @@ final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler 
   }
 
   private func emit(_ event: [String: Any]) {
-    sinkLock.lock()
-    let sink = eventSink
-    sinkLock.unlock()
-    guard let sink = sink else { return }
-    // Flutter wants sink calls on the main thread.
+    // Hop to the main thread first (Flutter requires it), then read the
+    // sink under the lock — onCancel can detach it while the hop is queued,
+    // and a detached sink must not be invoked.
     DispatchQueue.main.async {
-      sink(event)
+      self.sinkLock.lock()
+      let sink = self.eventSink
+      self.sinkLock.unlock()
+      sink?(event)
     }
   }
 
@@ -303,7 +330,7 @@ final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler 
     sinkLock.unlock()
     // If the source was already running when Dart subscribed, the original
     // ready event went nowhere. Send it again.
-    if isSourceRunning {
+    if isRunning {
       sendReady()
     }
     return nil

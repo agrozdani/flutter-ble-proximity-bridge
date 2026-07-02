@@ -80,7 +80,12 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
     private var bleHostSessionId: String? = null
 
     private var mockSource: MockPeerSource? = null
+
+    // Written on the main thread, read from Herald's worker threads, so it
+    // must be volatile for stops to be visible to in-flight callbacks.
+    @Volatile
     private var sourceMode = SourceMode.IDLE
+
     private var pendingQuiesce: Runnable? = null
 
     // Herald calls us on worker threads. Flutter sink calls must happen on
@@ -89,7 +94,8 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
     private val sinkLock = Any()
     private val mainThread = Handler(Looper.getMainLooper())
 
-    private val isSourceRunning: Boolean
+    /** True while a source (BLE or mock) is logically running. */
+    val isRunning: Boolean
         get() = sourceMode != SourceMode.IDLE
 
     // ----- Service lifecycle -------------------------------------------------
@@ -130,6 +136,16 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
             // A racing stop may have left the BLE host running, so always
             // quiesce it before switching to mock mode.
             quiesceBleHost()
+            // Mock mode has no transport, but the supplier still holds the
+            // status this device broadcasts so updateStatus keeps working.
+            // Reuse the BLE host's supplier if one exists — the host keeps
+            // serving whatever supplier it was built with.
+            val supplier = payloadSupplier
+            if (supplier == null) {
+                payloadSupplier = StatusPayloadSupplier(peerId)
+            } else {
+                supplier.updatePeerId(peerId)
+            }
             startMockSource()
         } else {
             if (!hasBluetoothPermissions()) {
@@ -393,7 +409,7 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
         synchronized(sinkLock) { eventSink = events }
         // If the source was already running when Dart subscribed, the first
         // ready event went nowhere. Send it again.
-        if (isSourceRunning) sendReady()
+        if (isRunning) sendReady()
     }
 
     override fun onCancel(arguments: Any?) {

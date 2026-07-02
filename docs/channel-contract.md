@@ -32,7 +32,8 @@ Starts proximity detection.
 
 Returns `true` when the request was accepted. **Acceptance is not
 readiness** — initialization completes asynchronously and is signaled by
-the `ready` event. Errors: `bad_args`, `start_failed`.
+the `ready` event. Errors: `bad_args`, `start_failed` (Android only — iOS
+accepts the request and surfaces start failures through the ready timeout).
 
 ### `updateStatus`
 

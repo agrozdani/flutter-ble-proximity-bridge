@@ -38,7 +38,9 @@ final class StatusPayloadSupplier: PayloadDataSupplier {
   private var offline = false
 
   init(peerId: Int) {
-    self.peerId = UInt64(peerId)
+    // Bit-pattern conversion so a negative id round-trips instead of
+    // trapping — the Android encoder (Kotlin Long) has the same semantics.
+    self.peerId = UInt64(bitPattern: Int64(peerId))
   }
 
   func update(status: Int, color: Int) {
@@ -51,7 +53,7 @@ final class StatusPayloadSupplier: PayloadDataSupplier {
   func updatePeerId(_ peerId: Int) {
     lock.lock()
     defer { lock.unlock() }
-    self.peerId = UInt64(peerId)
+    self.peerId = UInt64(bitPattern: Int64(peerId))
   }
 
   /// While offline, every payload we serve carries the goodbye flag,
@@ -93,7 +95,10 @@ final class StatusPayloadSupplier: PayloadDataSupplier {
     guard data.count >= payloadSize, let value = data.uint64(0) else {
       return nil
     }
-    return Int(value)
+    // Bit-pattern conversion, not Int(value): an id with the top bit set
+    // (any device could broadcast one on our service UUID) must decode as
+    // a negative Int — matching Kotlin's signed Long — instead of trapping.
+    return Int(bitPattern: UInt(value))
   }
 
   static func status(from data: Data) -> Int? {

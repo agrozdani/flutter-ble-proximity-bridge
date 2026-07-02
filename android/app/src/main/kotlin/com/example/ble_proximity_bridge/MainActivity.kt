@@ -118,7 +118,11 @@ class MainActivity : FlutterActivity() {
             result.error("bad_args", "updateStatus requires status and color", null)
             return
         }
-        val supplier = ProximityService.instance()?.payloadSupplier
+        // Gate on isRunning, not just on the supplier: the supplier stays
+        // warm across logical stops so lingering peers can read the offline
+        // payload, but updateStatus is only valid while a source runs.
+        val service = ProximityService.instance()
+        val supplier = if (service?.isRunning == true) service.payloadSupplier else null
         if (supplier == null) {
             result.error("not_running", "updateStatus requires a running bridge", null)
             return

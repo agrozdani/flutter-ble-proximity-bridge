@@ -164,6 +164,32 @@ void main() {
     );
   });
 
+  test('start fails fast when the event stream errors mid-handshake', () async {
+    // The stream dying before ready must fail the start immediately, not
+    // after the 10 s ready timeout runs out.
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockStreamHandler(
+          eventChannel,
+          MockStreamHandler.inline(
+            onListen: (arguments, events) {
+              events.error(code: 'boom', message: 'stack died');
+            },
+          ),
+        );
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await container
+        .read(bridgeProvider.notifier)
+        .start(mock: true)
+        .timeout(const Duration(seconds: 5));
+
+    final bridge = container.read(bridgeProvider);
+    expect(bridge.phase, BridgePhase.error);
+    expect(bridge.error, contains('stack died'));
+  });
+
   test('start fails cleanly when the native side rejects it', () async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
         .setMockMethodCallHandler(methodChannel, (call) async {
