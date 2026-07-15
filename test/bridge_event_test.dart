@@ -46,8 +46,10 @@ void main() {
     });
 
     test('integer measurements are widened to double', () {
-      // The standard codec delivers whole numbers as int even when the
-      // native side declared them floating point.
+      // The standard codec preserves the sender's type, and both platforms
+      // currently declare these as Double — but the decoder shouldn't depend
+      // on that. Widening through num keeps it safe if a native side ever
+      // sends whole-number measurements as int.
       final event = BridgeEvent.fromMap({
         'type': 'peer',
         'id': 7,
