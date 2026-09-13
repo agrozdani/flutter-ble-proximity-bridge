@@ -295,7 +295,7 @@ treatment, including the ordering analysis, is in
 
 | Platform | Minimum OS | Real BLE? | Runs mock mode? |
 |---|---|---|---|
-| Android phone | 7.0 (API 24, this app's `minSdk`; Herald itself supports API 21+) | ✅ yes | ✅ yes |
+| Android phone | 7.0 (API 24, Flutter's default `minSdk`; Herald itself supports API 21+) | ✅ yes | ✅ yes |
 | Android emulator | — | ❌ no BLE radio | ✅ yes |
 | iPhone | iOS 15.5+ | ✅ yes | ✅ yes |
 | iOS simulator | — | ❌ no Bluetooth at all | ✅ yes |
@@ -303,7 +303,8 @@ treatment, including the ordering analysis, is in
 Toolchain: a recent **Flutter 3.x** (Dart SDK `^3.12.0`; the iOS integration
 uses the `FlutterImplicitEngineDelegate` scene lifecycle, which requires a
 current Flutter release), Xcode 26 / CocoaPods for iOS, Android Studio / SDK
-for Android.
+for Android (SDK Platform 37 installed; `permission_handler` requires
+`compileSdk 37`, which in turn needs AGP 9.1+ and Gradle 9.3.1).
 
 ```bash
 flutter pub get
