@@ -6,7 +6,9 @@ plugins {
 
 android {
     namespace = "com.example.ble_proximity_bridge"
-    compileSdk = flutter.compileSdkVersion
+    // permission_handler 13 (permission_handler_android 14) requires compileSdk 37;
+    // Flutter's default is still 36. Keep this at least as high as flutter.compileSdkVersion.
+    compileSdk = maxOf(37, flutter.compileSdkVersion)
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -16,9 +18,9 @@ android {
 
     defaultConfig {
         applicationId = "com.example.ble_proximity_bridge"
-        // Herald supports API 21+; 24 is Flutter's current default minimum,
-        // pinned here so the floor doesn't drift with the Flutter version.
-        minSdk = maxOf(24, flutter.minSdkVersion)
+        // Herald supports API 21+, so Flutter's default minimum (currently 24)
+        // is the binding floor.
+        minSdk = flutter.minSdkVersion
         targetSdk = flutter.targetSdkVersion
         versionCode = flutter.versionCode
         versionName = flutter.versionName
