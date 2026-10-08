@@ -23,6 +23,13 @@
     <uses-permission
         android:name="android.permission.ACCESS_FINE_LOCATION"
         android:maxSdkVersion="30" />
+    <!-- Herald's library manifest also declares ACCESS_COARSE_LOCATION with
+         no maxSdkVersion, which would put a location permission on every
+         Android version. Herald never checks it, and FINE above covers
+         scanning on Android 11 and below, so drop it from the merge. -->
+    <uses-permission
+        android:name="android.permission.ACCESS_COARSE_LOCATION"
+        tools:node="remove" />
 
     <!-- Scanning continues while the app is backgrounded via a foreground
          service of type connectedDevice (the type for BLE interactions). -->
@@ -65,6 +72,13 @@
             android:enabled="true"
             android:exported="false"
             android:stopWithTask="false" />
+
+        <!-- Herald's library manifest declares its own location-type
+             foreground service. Nothing starts it (ProximityService is the
+             foreground service), so keep it out of the merged manifest. -->
+        <service
+            android:name="io.heraldprox.herald.sensor.service.ForegroundService"
+            tools:node="remove" />
 
         <!-- Don't delete the meta-data below.
              This is used by the Flutter tool to generate GeneratedPluginRegistrant.java -->

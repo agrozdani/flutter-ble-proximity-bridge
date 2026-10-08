@@ -3,10 +3,14 @@ package com.example.ble_proximity_bridge
 import kotlin.math.abs
 
 /**
- * Basic 1-D Kalman filter, used here to smooth the median RSSI. It seeds
- * itself with the first measurement so it does not start from zero.
- * processNoise controls how quickly it follows changes: higher reacts
- * faster, lower smooths more.
+ * Simple 1-D Kalman-style filter, used here to smooth the median RSSI. It
+ * seeds itself with the first measurement so it does not start from zero.
+ *
+ * Not the textbook form: there is no fixed predict step (P += Q). Instead
+ * the error estimate grows by processNoise times how far the estimate just
+ * moved, so a steady signal is smoothed harder and harder while a real jump
+ * re-opens the gain over a dozen or so samples. processNoise controls how quickly
+ * it follows changes: higher reacts faster, lower smooths more.
  */
 class KalmanFilter1D(
     private val measurementNoise: Double,

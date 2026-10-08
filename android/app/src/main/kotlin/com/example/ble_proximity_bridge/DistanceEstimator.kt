@@ -20,9 +20,9 @@ class DistanceEstimator {
     }
 
     /**
-     * Adds one RSSI sample and returns the current estimate, or null until
-     * there is enough data. One synchronized operation so BLE callbacks
-     * cannot interleave.
+     * Adds one RSSI sample and returns the current estimate (from the first
+     * sample on), or null for a NaN sample. One synchronized operation so BLE
+     * callbacks cannot interleave.
      */
     @Synchronized
     fun addSample(peerId: Long, rssi: Double, senderDeviceKind: Int): Double? {

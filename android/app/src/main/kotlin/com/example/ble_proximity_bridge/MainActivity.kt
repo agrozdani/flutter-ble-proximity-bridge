@@ -8,6 +8,7 @@ import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.EventChannel
 import io.flutter.plugin.common.MethodCall
 import io.flutter.plugin.common.MethodChannel
+import java.util.UUID
 
 /**
  * Registers the platform channels and handles method calls. These names
@@ -84,12 +85,26 @@ class MainActivity : FlutterActivity() {
             result.error("bad_args", "start requires sessionId and peerId", null)
             return
         }
+        // Validate here: the service turns sessionId into the BLE service UUID
+        // and can only report problems after Dart has been told "accepted".
+        if (!isCanonicalUuid(sessionId) || peerId < 0) {
+            result.error("bad_args", "sessionId must be a UUID string and peerId non-negative", null)
+            return
+        }
+
+        // Refuse here rather than in the service: a service started with
+        // startForegroundService() that stops without promoting crashes the app.
+        if (!mock && !ProximityService.hasBluetoothPermissions(this)) {
+            result.error("permission_denied", "Bluetooth permissions are not granted", null)
+            return
+        }
 
         try {
             val intent = Intent(this, ProximityService::class.java)
                 .putExtra(ProximityService.EXTRA_SESSION_ID, sessionId)
                 .putExtra(ProximityService.EXTRA_PEER_ID, peerId)
                 .putExtra(ProximityService.EXTRA_MOCK, mock)
+                .putExtra(ProximityService.EXTRA_COMMAND, ProximityService.nextCommand())
             if (!mock && Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                 startForegroundService(intent)
             } else {
@@ -106,9 +121,19 @@ class MainActivity : FlutterActivity() {
 
     private fun handleStop(result: MethodChannel.Result) {
         // Stopping when already stopped is fine. The service stays warm so
-        // the next start can reuse the Herald stack.
+        // the next start can reuse the Herald stack. Taking a command number
+        // also cancels a start that Android has not delivered yet.
+        ProximityService.nextCommand()
         ProximityService.instance()?.stopProximity()
         result.success(null)
+    }
+
+    private fun isCanonicalUuid(value: String): Boolean = try {
+        // UUID.fromString also accepts short forms like "1-2-3-4-5"; iOS does
+        // not, so require the round trip to match.
+        UUID.fromString(value).toString().equals(value, ignoreCase = true)
+    } catch (e: IllegalArgumentException) {
+        false
     }
 
     private fun handleUpdateStatus(call: MethodCall, result: MethodChannel.Result) {
