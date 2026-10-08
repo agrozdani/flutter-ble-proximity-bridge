@@ -37,7 +37,7 @@ Flutter interface, paired with an implementation that can be adapted directly.
 | Single long-lived BLE host | BLE stacks neither stop cleanly on demand nor survive rebuild races | [architecture.md](docs/architecture.md#stopping-is-a-protocol-problem) |
 | Protocol-level goodbye/hello | A stopped peripheral can't disconnect its centrals — peers would see a ghost | [architecture.md](docs/architecture.md#stopping-is-a-protocol-problem) |
 | Foreground service for background BLE | Android kills background scanning without one | [android.md](docs/android.md) |
-| Background modes + state restoration | iOS suspends apps; CoreBluetooth can relaunch them | [ios.md](docs/ios.md) |
+| Bluetooth background modes | iOS suspends a backgrounded app's BLE work without them | [ios.md](docs/ios.md) |
 | Transport-agnostic mock source | The full bridge runs on simulators with zero Bluetooth | [architecture.md](docs/architecture.md) |
 
 ## The hard problem: stopping cleanly
@@ -47,11 +47,12 @@ problem — and the one this project is largely built around — is stopping
 cleanly.
 
 When a device stops, it should disappear from every other device's list. It
-does not. A `CBPeripheralManager` (iOS) has no API to disconnect a central
-already connected to it, and Herald holds those GATT connections open for
-continuous RSSI. A "stopped" device therefore keeps serving its **cached**
-payload over the surviving link, and peers continue to see it — a ghost peer
-that lingers indefinitely.
+does not. Herald holds GATT connections between iPhones open for continuous
+RSSI, and reports every reading together with the payload it **last read**
+from that peer. A `CBPeripheralManager` (iOS) has no API to disconnect a
+central already connected to it, and a stopped Herald stack keeps answering
+reads over the surviving link. Peers therefore continue to see a "stopped"
+iPhone, with its last status — a ghost peer that lingers indefinitely.
 
 ```mermaid
 sequenceDiagram
@@ -60,11 +61,10 @@ sequenceDiagram
 
     Note over A,B: A and B hold a live GATT connection
     A->>A: user taps Stop
-    Note over A: the radio cannot disconnect B,<br/>so its cached payload survives
+    Note over A: the radio cannot disconnect B,<br/>so the link survives
     loop with no goodbye
-        B->>A: re-read payload over the live link
-        A-->>B: cached payload — A still looks online
-        Note over B: A lingers as a ghost peer
+        B->>B: measure A's RSSI over the live link
+        Note over B: reports A with its last-read payload —<br/>A lingers as a ghost peer
     end
     rect rgb(223, 240, 216)
         A->>B: goodbye frame (offline flag)<br/>via Herald immediateSendAll
@@ -73,10 +73,12 @@ sequenceDiagram
 ```
 
 The solution is to treat "stopped" as a protocol state rather than a radio
-state: the device flags its payload offline and pushes a goodbye frame to every
-connected peer, with staleness eviction as a fallback for peers that crashed or
-moved out of range. The full reasoning — including why the Herald host must be
-reused rather than rebuilt — is in
+state: the device flags its payload offline and pushes a goodbye frame to its
+peers, with payload re-reads and staleness eviction as fallbacks for peers the
+frame does not reach — including every Android receiver, since Herald 2.2.0
+for Android does not deliver these frames. The full reasoning — including why
+the Herald host must be reused rather than rebuilt, and the limits of each
+net — is in
 [architecture.md → Stopping is a protocol problem](docs/architecture.md#stopping-is-a-protocol-problem).
 
 ## Background concepts
@@ -286,8 +288,8 @@ sequenceDiagram
 ```
 
 Dart subscribes **before** calling `start` so the `ready` event cannot be
-missed, and native **re-sends** `ready` to any late subscriber (hot restart,
-app resume). The handshake is therefore race-proof from both ends; the full
+missed, and native **re-sends** `ready` to any late subscriber (e.g. after a
+hot restart, or when the app is reopened while native kept running). The handshake is therefore race-proof from both ends; the full
 treatment, including the ordering analysis, is in
 [architecture.md → The ready handshake](docs/architecture.md#the-ready-handshake).
 
@@ -301,10 +303,11 @@ treatment, including the ordering analysis, is in
 | iOS simulator | — | ❌ no Bluetooth at all | ✅ yes |
 
 Toolchain: a recent **Flutter 3.x** (Dart SDK `^3.12.0`; the iOS integration
-uses the `FlutterImplicitEngineDelegate` scene lifecycle, which requires a
-current Flutter release), Xcode 26 / CocoaPods for iOS, Android Studio / SDK
-for Android (SDK Platform 37 installed; `permission_handler` requires
-`compileSdk 37`, which in turn needs AGP 9.1+ and Gradle 9.3.1).
+uses the `FlutterImplicitEngineDelegate` scene lifecycle, available since
+Flutter 3.38), Xcode 26 or later (builds with Xcode 27) / CocoaPods for iOS,
+Android Studio / SDK for Android (SDK Platform 37 installed;
+`permission_handler` requires `compileSdk 37`, which in turn needs AGP 9.1.1+
+and therefore Gradle 9.3.1+).
 
 ```bash
 flutter pub get
@@ -317,12 +320,12 @@ For iOS, install pods once (Flutter usually does this on the first build):
 cd ios && pod install
 ```
 
-> **Note for iOS builds:** Herald 2.2.0 trips the Swift 6.3+ (Xcode 26)
-> type-checker on one statistics file. The `Podfile` carries a `post_install`
-> hook (`patch_herald_for_swift6`) that decomposes the offending expressions —
-> it runs automatically during `pod install`, is mathematically identical, and
-> self-disables once Herald ships a fix. Details in
-> [ios.md → The Herald build patch](docs/ios.md#the-herald-build-patch).
+> **Note for iOS builds:** the `Podfile`'s `post_install` hook patches two
+> Herald 2.2.0 source files during `pod install`: a crash fix for
+> `immediateSendAll` (which this bridge uses for its goodbye/hello frames), and
+> a rewrite of one statistics file that trips the Swift 6.3 (Xcode 26.4)
+> type-checker. Both are idempotent and do nothing once Herald changes the
+> code. Details in [ios.md → The Herald patches](docs/ios.md#the-herald-patches).
 
 ## Running the demo
 
@@ -408,11 +411,12 @@ radio:
 - [`bridge_controller_test.dart`](test/bridge_controller_test.dart) drives the
   full Dart half end to end with the native side faked: the start sequence
   (subscribe → start → await ready → push status), peer ingestion, the immediate
-  goodbye path, clean stop/restart, a rejected start, and an event stream that
-  errors mid-handshake.
+  goodbye path, clean stop/restart, a rejected start, an event stream that
+  errors mid-handshake, a stop that cancels a start mid-handshake, and a status
+  change made while the handshake is finishing.
 - [`bridge_event_test.dart`](test/bridge_event_test.dart) covers event decoding
-  and the codec edge cases — including a whole-number `double` arriving from
-  native as an `int` and being widened back.
+  and its edge cases — including integer-typed measurements being widened to
+  `double` (defensive: the codec itself preserves native `Double`s).
 
 ## Adapting it for your own app
 
@@ -432,13 +436,16 @@ Deliberate non-goals, which mark the boundaries of the implementation: no state
 persistence, no retry/backoff beyond resume-retry, and no Pigeon (the channels
 are hand-written to remain legible). The full list is in
 [architecture.md → What is deliberately not here](docs/architecture.md#what-is-deliberately-not-here).
+Known limitations — mostly inherited from Herald 2.2.0, such as relayed
+payloads briefly resurrecting a stopped iPhone — are listed in
+[architecture.md → Known limitations](docs/architecture.md#known-limitations).
 
 ## Documentation
 
 - [Architecture](docs/architecture.md) — bridge design, data flow, lifecycle, threading
 - [Channel contract](docs/channel-contract.md) — every method, event, and wire byte
 - [Android implementation](docs/android.md) — foreground service, permissions, the pending-sink race
-- [iOS implementation](docs/ios.md) — background modes, state restoration, the Herald build patch
+- [iOS implementation](docs/ios.md) — background modes, state restoration, the Herald patches
 
 ## License & credits
 
