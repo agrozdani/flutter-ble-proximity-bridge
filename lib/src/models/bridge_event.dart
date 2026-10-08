@@ -46,9 +46,9 @@ class UnknownBridgeEvent extends BridgeEvent {
 
 /// One raw sighting of a nearby peer.
 ///
-/// [rssi] and [distance] are optional: payload reads don't always come with
-/// a measurement, and the distance estimate needs a few samples before it
-/// produces anything.
+/// [rssi] and [distance] are optional: payload reads, goodbye/hello frames
+/// and relayed payloads don't come with a measurement. Native includes
+/// [distance] whenever it includes [rssi].
 class PeerSighting extends BridgeEvent {
   const PeerSighting({
     required this.id,

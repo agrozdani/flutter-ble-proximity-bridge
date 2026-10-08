@@ -1,6 +1,7 @@
 import 'package:ble_proximity_bridge/src/bridge/channel_names.dart';
 import 'package:ble_proximity_bridge/src/models/peer.dart';
 import 'package:ble_proximity_bridge/src/providers/bridge_provider.dart';
+import 'package:ble_proximity_bridge/src/providers/my_status_provider.dart';
 import 'package:ble_proximity_bridge/src/providers/peers_provider.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -68,6 +69,9 @@ void main() {
     addTearDown(container.dispose);
 
     await container.read(bridgeProvider.notifier).start(mock: true);
+    // start() returns on the ready event; let the queued sightings flush
+    // through the stream before asserting on them.
+    await pumpEventQueue();
 
     final bridge = container.read(bridgeProvider);
     expect(bridge.phase, BridgePhase.running);
@@ -79,11 +83,13 @@ void main() {
       containsAllInOrder([BridgeMethods.start, BridgeMethods.updateStatus]),
     );
 
-    // Both sightings were folded into one peer; measurements from the first
-    // sighting survive the second one, which carried none.
+    // Both sightings were folded into one peer. The second one changed the
+    // status, so it got past the UI throttle even though it arrived right
+    // after the first; the measurements it lacked carried over.
     final peer = container.read(peersProvider)[7];
     expect(peer, isNotNull);
-    expect(peer!.colorIndex, 3);
+    expect(peer!.status, PeerStatus.busy);
+    expect(peer.colorIndex, 3);
     expect(peer.deviceKind, DeviceKind.android);
     expect(peer.rssi, -60.0);
     expect(peer.distance, 1.5);
@@ -189,6 +195,79 @@ void main() {
     expect(bridge.phase, BridgePhase.error);
     expect(bridge.error, contains('stack died'));
   });
+
+  test('a stop during the handshake cancels that start without disturbing '
+      'the next one', () async {
+    // The first subscription never gets a ready event (native still
+    // initializing); the second one does.
+    var listens = 0;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockStreamHandler(
+          eventChannel,
+          MockStreamHandler.inline(
+            onListen: (arguments, events) {
+              listens++;
+              if (listens > 1) {
+                events.success({
+                  BridgeEventKeys.type: BridgeEventKeys.typeReady,
+                });
+              }
+            },
+          ),
+        );
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final controller = container.read(bridgeProvider.notifier);
+
+    final firstStart = controller.start(mock: true);
+    await pumpEventQueue();
+    await controller.stop();
+    await controller.start(mock: true);
+    expect(container.read(bridgeProvider).phase, BridgePhase.running);
+
+    // The cancelled start returns promptly instead of waiting out the ready
+    // timeout, and its failure path leaves the new session alone.
+    await firstStart.timeout(const Duration(seconds: 5));
+    expect(container.read(bridgeProvider).phase, BridgePhase.running);
+    expect(
+      methodCalls.where((call) => call.method == BridgeMethods.stop),
+      hasLength(1),
+    );
+  });
+
+  test(
+    'a status change made during the handshake still reaches native',
+    () async {
+      late final ProviderContainer container;
+      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+          .setMockMethodCallHandler(methodChannel, (call) async {
+            methodCalls.add(call);
+            // The user picks a new status while the initial push is in flight,
+            // i.e. before the bridge reports running.
+            if (call.method == BridgeMethods.updateStatus &&
+                methodCalls
+                        .where((c) => c.method == BridgeMethods.updateStatus)
+                        .length ==
+                    1) {
+              await container
+                  .read(myStatusProvider.notifier)
+                  .setStatus(PeerStatus.away);
+            }
+            return call.method == BridgeMethods.start ? true : null;
+          });
+
+      container = ProviderContainer();
+      addTearDown(container.dispose);
+
+      await container.read(bridgeProvider.notifier).start(mock: true);
+
+      final pushed = methodCalls
+          .where((call) => call.method == BridgeMethods.updateStatus)
+          .map((call) => (call.arguments as Map)[BridgeArgs.status]);
+      expect(pushed.last, PeerStatus.away.code);
+    },
+  );
 
   test('start fails cleanly when the native side rejects it', () async {
     TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger

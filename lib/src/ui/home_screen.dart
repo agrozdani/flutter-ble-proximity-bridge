@@ -91,7 +91,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                   onChanged:
                       bridge.phase == BridgePhase.idle ||
                           bridge.phase == BridgePhase.error
-                      ? (value) => setState(() => _mockMode = value)
+                      ? (value) {
+                          setState(() => _mockMode = value);
+                          // Switching transport abandons a failed start, so
+                          // the resume retry can't restart the old one.
+                          if (bridge.phase == BridgePhase.error) {
+                            ref.read(bridgeProvider.notifier).stop();
+                          }
+                        }
                       : null,
                 ),
                 if (bridge.error != null)

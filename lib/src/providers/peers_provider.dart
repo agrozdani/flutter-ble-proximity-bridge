@@ -14,8 +14,9 @@ final peersProvider = NotifierProvider<PeersController, Map<int, Peer>>(
 /// updates and evicts peers that go quiet.
 class PeersController extends Notifier<Map<int, Peer>> {
   /// BLE can report several sightings per second per peer. No point
-  /// rebuilding the list for each one, so state updates are throttled.
-  /// Bookkeeping (last-seen times) still happens every time.
+  /// rebuilding the list for each one, so measurement-only updates are
+  /// throttled. A sighting that changes what the peer broadcasts always gets
+  /// through, and bookkeeping (last-seen times) happens every time.
   static const Duration _uiThrottle = Duration(milliseconds: 250);
 
   /// Fallback eviction window. Peers normally announce a goodbye (handled
@@ -41,8 +42,14 @@ class PeersController extends Notifier<Map<int, Peer>> {
     _lastSeen[sighting.id] = now;
 
     final existing = state[sighting.id];
+    final status = PeerStatus.fromCode(sighting.statusCode);
     final lastEmitted = _lastEmitted[sighting.id];
-    if (existing != null &&
+    final broadcastChanged =
+        existing == null ||
+        existing.status != status ||
+        existing.colorIndex != sighting.colorIndex ||
+        existing.deviceKind != sighting.deviceKind;
+    if (!broadcastChanged &&
         lastEmitted != null &&
         now.difference(lastEmitted) < _uiThrottle) {
       return;
@@ -53,7 +60,7 @@ class PeersController extends Notifier<Map<int, Peer>> {
       ...state,
       sighting.id: Peer(
         id: sighting.id,
-        status: PeerStatus.fromCode(sighting.statusCode),
+        status: status,
         colorIndex: sighting.colorIndex,
         deviceKind: sighting.deviceKind,
         // Keep the old measurement if this sighting didn't carry one.
