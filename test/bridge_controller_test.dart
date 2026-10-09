@@ -196,6 +196,37 @@ void main() {
     expect(bridge.error, contains('stack died'));
   });
 
+  test('a stream error while running shows the native message', () async {
+    // E.g. Android destroying the service after the bridge is up.
+    late MockStreamHandlerEventSink sink;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockStreamHandler(
+          eventChannel,
+          MockStreamHandler.inline(
+            onListen: (arguments, events) {
+              sink = events;
+              events.success({BridgeEventKeys.type: BridgeEventKeys.typeReady});
+            },
+          ),
+        );
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+
+    await container.read(bridgeProvider.notifier).start(mock: true);
+    expect(container.read(bridgeProvider).phase, BridgePhase.running);
+
+    sink.error(
+      code: 'service_stopped',
+      message: 'Android stopped the proximity service',
+    );
+    await pumpEventQueue();
+
+    final bridge = container.read(bridgeProvider);
+    expect(bridge.phase, BridgePhase.error);
+    expect(bridge.error, 'Android stopped the proximity service');
+  });
+
   test('a stop during the handshake cancels that start without disturbing '
       'the next one', () async {
     // The first subscription never gets a ready event (native still

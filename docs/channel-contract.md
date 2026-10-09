@@ -61,8 +61,8 @@ interval, but every install sets the same value).
 Only valid while the bridge is running (`not_running` otherwise; `bad_args`
 if an argument is missing). Dart pushes the current status right after the
 ready handshake, so the native side never broadcasts stale state for long —
-though a restart's hello frame still carries the previous session's status
-(see [Known limitations](architecture.md#known-limitations)).
+though a restart's hello frame still carries the last status pushed before
+the restart (see [Known limitations](architecture.md#known-limitations)).
 
 ### `stop`
 

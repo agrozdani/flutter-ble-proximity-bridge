@@ -62,8 +62,9 @@ end
 # Herald 2.2.0's BLEReceiver.immediateSendAll force-unwraps each target's
 # peripheral and signal characteristic inside a queued block. The
 # characteristic is nil until a new connection's services are discovered,
-# and Herald resets it to nil when a peer disconnects or re-publishes its
-# services (which every peer does on start()). A goodbye/hello sent in that
+# and Herald clears it again when an iOS peer disconnects or CoreBluetooth
+# reports a service change with no invalidated services; the peripheral can
+# also disconnect before the block runs. A goodbye/hello sent in such a
 # window crashes the app. This skips such peers instead; the block runs on
 # Herald's CoreBluetooth queue, where those fields are written, so reading
 # them there is race-free. Idempotent like the patch below.

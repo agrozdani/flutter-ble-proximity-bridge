@@ -242,13 +242,17 @@ knowing before building on the bridge:
   is not the relayed peer's. A sequence number in the payload would let
   receivers discard stale relays.
 - **Android keeps the CPU awake while the process lives.** Every Herald
-  `SensorArray` on Android starts a timer thread that takes a partial wake
-  lock and never ends, so the lock is only released at process death — it
-  is still held after Stop, and each rebuilt host (a session change, or a
-  new service after Android destroyed the idle one) adds another.
-- **The hello after a restart carries the previous status.** The host
-  reuses its payload supplier, so the hello goes out before Dart pushes the
-  current status; peers pick up the new status on their next re-read.
+  `SensorArray` on Android creates a timer that acquires a partial wake
+  lock and releases it only in a finalizer. The timer's thread never ends
+  and keeps the timer reachable, so the lock is held until the process
+  dies — it is still held after Stop, and each rebuilt host (a session
+  change, or a new service after Android destroyed the idle one) adds
+  another.
+- **The hello after a restart can carry an outdated status.** The host
+  reuses its payload supplier, which still holds the last status Dart
+  pushed, and the hello goes out before Dart pushes the current one. If the
+  status changed while the bridge was stopped (or the Dart side restarted),
+  peers see the old status until their next re-read.
 - **Reopening the app while native kept running changes the peer id.**
   Peer ids are random per Dart isolate. After a hot restart, or reopening an
   Android app whose service survived a swipe-away, the next start broadcasts

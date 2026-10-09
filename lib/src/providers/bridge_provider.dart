@@ -183,7 +183,9 @@ class BridgeController extends Notifier<BridgeState> {
       phase: BridgePhase.error,
       mockMode: state.mockMode,
       localPeerId: _localPeerId,
-      error: '$error',
+      error: error is PlatformException
+          ? (error.message ?? error.code)
+          : '$error',
     );
   }
 

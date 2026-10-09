@@ -113,10 +113,11 @@ a file writable just long enough to write it.
 **`patch_herald_immediate_send_all` — a crash fix.** Herald's
 `immediateSendAll` force-unwraps each target's peripheral and signal
 characteristic inside a block it queues for later. The characteristic is
-`nil` until a new connection's services are discovered, and Herald resets
-it to `nil` when a peer disconnects or re-publishes its services (which
-every peer does on `start()`). A goodbye or hello sent in that window
-crashes the app. The patch makes the block skip such peers instead.
+`nil` until a new connection's services are discovered, and Herald clears
+it again when an iOS peer disconnects or CoreBluetooth reports a service
+change with no invalidated services; the peripheral can also disconnect
+before the block runs. A goodbye or hello sent in such a window crashes
+the app. The patch makes the block skip such peers instead.
 
 **`patch_herald_for_swift6` — a build fix.** With Swift 6.3 (Xcode 26.4),
 `SampleStatistics.swift`'s compound arithmetic exceeds the type-checker

@@ -412,8 +412,8 @@ radio:
   full Dart half end to end with the native side faked: the start sequence
   (subscribe → start → await ready → push status), peer ingestion, the immediate
   goodbye path, clean stop/restart, a rejected start, an event stream that
-  errors mid-handshake, a stop that cancels a start mid-handshake, and a status
-  change made while the handshake is finishing.
+  errors mid-handshake or once running, a stop that cancels a start
+  mid-handshake, and a status change made while the handshake is finishing.
 - [`bridge_event_test.dart`](test/bridge_event_test.dart) covers event decoding
   and its edge cases — including integer-typed measurements being widened to
   `double` (defensive: the codec itself preserves native `Double`s).
