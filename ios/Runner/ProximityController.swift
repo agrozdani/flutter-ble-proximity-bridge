@@ -8,19 +8,21 @@ import os.log
 /// streams sightings to Flutter. iOS counterpart of ProximityService.
 ///
 /// The Herald SensorArray is created once and reused across stop/start.
-/// Rebuilding it doesn't work: Herald's CoreBluetooth managers use fixed
-/// restore identifiers and iOS won't allow two of those alive at once, and
-/// Herald's stop() can skip teardown depending on where its scan/advertise
-/// cycle happens to be. Peers that are already connected also stay
-/// connected, so "stopped" has to be said in the protocol itself: stop
-/// flags our payload offline and sends a goodbye frame to connected peers,
-/// start sends a hello. See StatusPayloadSupplier for the frame format.
+/// Rebuilding it doesn't work reliably: Herald's CoreBluetooth managers use
+/// fixed restore identifiers, so a new stack would race the old one, and
+/// Herald's receiver stop() skips its cleanup entirely if scanning wasn't
+/// active at that moment. Even a clean stop leaves peers that are connected
+/// to us connected, and our stopped stack keeps answering their payload
+/// reads, so "stopped" has to be said in the protocol itself: stop flags our
+/// payload offline and sends a goodbye frame to the peers we're connected
+/// to, start sends a hello. See StatusPayloadSupplier for the frame format.
 final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler {
 
   static let shared = ProximityController()
 
-  /// How often peers re-read our payload. Caps how stale a cached payload
-  /// can be if a goodbye/hello frame gets lost. 15s is fine for a demo.
+  /// How often we re-read a peer's payload. Every install uses the same
+  /// value, so it also caps how stale our payload can be on a connected
+  /// peer if a goodbye/hello frame gets lost. 15s is fine for a demo.
   private static let payloadRefreshSeconds: Foundation.TimeInterval = 15
 
   /// Gives the goodbye frame a moment to reach peers before we stop.
@@ -149,14 +151,16 @@ final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler 
     }
 
     // The session UUID doubles as the BLE service UUID, so only devices on
-    // the same session find each other. Herald's standard service is off to
-    // keep us isolated from other Herald apps.
+    // the same session find each other. Herald's standard and legacy
+    // (pre-2.1) services are off to keep us isolated from other Herald apps;
+    // legacy detection is on by default.
     BLESensorConfiguration.payloadDataUpdateTimeInterval = Self.payloadRefreshSeconds
     BLESensorConfiguration.customServiceUUID = CBUUID(string: sessionId)
     BLESensorConfiguration.customServiceDetectionEnabled = true
     BLESensorConfiguration.customServiceAdvertisingEnabled = true
     BLESensorConfiguration.standardHeraldServiceDetectionEnabled = false
     BLESensorConfiguration.standardHeraldServiceAdvertisingEnabled = false
+    BLESensorConfiguration.legacyHeraldServiceDetectionEnabled = false
     BLESensorConfiguration.logLevel = .off
     BLESensorConfiguration.mobilitySensorEnabled = nil
 

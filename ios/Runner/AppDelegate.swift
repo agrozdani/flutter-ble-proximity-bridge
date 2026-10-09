@@ -1,6 +1,5 @@
 import Flutter
 import UIKit
-import os.log
 
 /// Registers the platform channels and dispatches method calls. The channel
 /// names here must match lib/src/bridge/channel_names.dart.
@@ -23,23 +22,7 @@ import os.log
   private let statusArg = "status"
   private let colorArg = "color"
 
-  // MARK: - Application lifecycle
-
-  override func application(
-    _ application: UIApplication,
-    didFinishLaunchingWithOptions launchOptions: [UIApplication.LaunchOptionsKey: Any]?
-  ) -> Bool {
-    // iOS can relaunch a killed app in the background to deliver Bluetooth
-    // events. These launch keys are the only way to tell that happened.
-    if let centrals = launchOptions?[.bluetoothCentrals] as? [String], !centrals.isEmpty {
-      os_log("Launched for Bluetooth central state restoration", type: .info)
-    }
-    if let peripherals = launchOptions?[.bluetoothPeripherals] as? [String], !peripherals.isEmpty {
-      os_log("Launched for Bluetooth peripheral state restoration", type: .info)
-    }
-
-    return super.application(application, didFinishLaunchingWithOptions: launchOptions)
-  }
+  // MARK: - Engine setup
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
@@ -86,6 +69,12 @@ import os.log
       let peerId = args[peerIdArg] as? Int
     else {
       result(FlutterError(code: "bad_args", message: "start requires sessionId and peerId", details: nil))
+      return
+    }
+    // Validate here, matching Android: the session id becomes the BLE service
+    // UUID (CBUUID(string:) raises on malformed input).
+    guard UUID(uuidString: sessionId) != nil, peerId >= 0 else {
+      result(FlutterError(code: "bad_args", message: "sessionId must be a UUID string and peerId non-negative", details: nil))
       return
     }
     let mock = args[mockArg] as? Bool ?? false

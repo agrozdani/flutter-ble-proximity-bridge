@@ -19,9 +19,9 @@ final class DistanceEstimator {
     models.removeAll()
   }
 
-  /// Adds one RSSI sample and returns the current estimate, or nil until
-  /// there's enough data. One locked operation so concurrent BLE callbacks
-  /// can't interleave.
+  /// Adds one RSSI sample and returns the current estimate (from the first
+  /// sample on), or nil for a NaN sample. One locked operation so concurrent
+  /// BLE callbacks can't interleave.
   func addSample(peerId: Int, rssi: Double, senderDeviceKind: Int) -> Double? {
     guard !rssi.isNaN else { return nil }
     lock.lock()

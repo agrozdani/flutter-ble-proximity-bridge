@@ -52,8 +52,13 @@ class BridgeController extends Notifier<BridgeState> {
   AppLifecycleListener? _lifecycle;
 
   /// Set between start() and stop(). Lets the resume hook retry a failed
-  /// start after the user comes back from Settings.
+  /// start when the app comes back to the foreground.
   bool _startRequested = false;
+
+  /// Bumped by every start() and stop(). A call that resumes from an await
+  /// after a newer one took over must leave the bridge alone: its teardown
+  /// or state write would clobber the newer session.
+  int _generation = 0;
 
   @override
   BridgeState build() {
@@ -67,6 +72,7 @@ class BridgeController extends Notifier<BridgeState> {
 
   Future<void> start({bool mock = false}) async {
     if (state.phase == BridgePhase.starting || state.isRunning) return;
+    final generation = ++_generation;
     _startRequested = true;
     state = BridgeState(
       phase: BridgePhase.starting,
@@ -83,6 +89,7 @@ class BridgeController extends Notifier<BridgeState> {
     // that surface as an unhandled error in the gap.
     ready.future.ignore();
     await _subscription?.cancel();
+    if (generation != _generation) return;
     _subscription = ref
         .read(eventChannelProvider)
         .events()
@@ -102,23 +109,36 @@ class BridgeController extends Notifier<BridgeState> {
       await ready.future.timeout(const Duration(seconds: 10));
 
       // Native starts with a blank payload; push our current status now.
-      final status = ref.read(myStatusProvider);
+      final pushed = ref.read(myStatusProvider);
       await ref
           .read(methodChannelProvider)
-          .updateStatus(status: status.status.code, color: status.colorIndex);
+          .updateStatus(status: pushed.status.code, color: pushed.colorIndex);
 
-      // A concurrent stop() means idle was requested; stay there.
-      if (!_startRequested) return;
+      // A stop() ran while we waited, so idle was requested; stay there.
+      if (generation != _generation) return;
+      // The stream reported an error after ready; don't mask it.
+      if (state.phase == BridgePhase.error) return;
       state = BridgeState(
         phase: BridgePhase.running,
         mockMode: mock,
         localPeerId: _localPeerId,
       );
+
+      // A change made while that push was in flight saw the bridge not yet
+      // running, so MyStatusController didn't send it. Send it now.
+      final latest = ref.read(myStatusProvider);
+      if (latest.status != pushed.status ||
+          latest.colorIndex != pushed.colorIndex) {
+        await ref
+            .read(methodChannelProvider)
+            .updateStatus(status: latest.status.code, color: latest.colorIndex);
+      }
     } on Exception catch (e) {
+      // Superseded by a stop() (and maybe a fresh start()): this failure is
+      // moot, and tearing down now would kill whatever came after.
+      if (generation != _generation) return;
       await _teardown();
-      // A concurrent stop() means idle was requested; don't overwrite it
-      // with the error from the start it cancelled.
-      if (!_startRequested) return;
+      if (generation != _generation) return;
       state = BridgeState(
         phase: BridgePhase.error,
         mockMode: mock,
@@ -129,8 +149,11 @@ class BridgeController extends Notifier<BridgeState> {
   }
 
   Future<void> stop() async {
+    final generation = ++_generation;
     _startRequested = false;
     await _teardown();
+    // A start() issued while teardown was in flight owns the bridge now.
+    if (generation != _generation) return;
     ref.read(peersProvider.notifier).clear();
     state = const BridgeState();
   }
@@ -160,12 +183,17 @@ class BridgeController extends Notifier<BridgeState> {
       phase: BridgePhase.error,
       mockMode: state.mockMode,
       localPeerId: _localPeerId,
-      error: '$error',
+      error: error is PlatformException
+          ? (error.message ?? error.code)
+          : '$error',
     );
   }
 
-  /// Retry a failed start when the app comes back to the foreground, e.g.
-  /// after the user turned Bluetooth on or granted permissions in Settings.
+  /// Retry a failed start, or a bridge that died, when the app comes back to
+  /// the foreground: e.g. Android stopped the service while the app was in
+  /// the background, or refused to start it. Bluetooth being off is not a
+  /// failure: both platforms start anyway and Herald begins scanning once
+  /// Bluetooth comes on.
   void _onAppResumed() {
     if (_startRequested && state.phase == BridgePhase.error) {
       start(mock: state.mockMode);
@@ -173,13 +201,28 @@ class BridgeController extends Notifier<BridgeState> {
   }
 
   Future<void> _teardown() async {
-    await _subscription?.cancel();
+    // Detach everything synchronously, before the first await, so a start()
+    // that runs during teardown installs fresh state instead of having it
+    // cleared out from under it.
+    final subscription = _subscription;
     _subscription = null;
+    final ready = _ready;
     _ready = null;
+    // A start() still waiting for ready returns now instead of after the
+    // timeout.
+    if (ready != null && !ready.isCompleted) {
+      ready.completeError(const _StartCancelled());
+    }
+    await subscription?.cancel();
     try {
       await ref.read(methodChannelProvider).stop();
     } on PlatformException {
       // Already stopped is fine. Teardown has to work from any state.
     }
   }
+}
+
+/// Fails a ready wait that teardown abandoned, so its start() can return.
+class _StartCancelled implements Exception {
+  const _StartCancelled();
 }

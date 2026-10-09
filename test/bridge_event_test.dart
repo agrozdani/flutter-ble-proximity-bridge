@@ -30,8 +30,8 @@ void main() {
     });
 
     test('decodes a sighting without measurements', () {
-      // A GATT payload read can arrive without a fresh RSSI sample, and the
-      // distance estimator returns nothing until its window has data.
+      // A GATT payload read arrives without a fresh RSSI sample, and native
+      // only computes a distance when it has one.
       final event = BridgeEvent.fromMap({
         'type': 'peer',
         'id': 7,

@@ -17,8 +17,8 @@ import Herald
 /// ```
 ///
 /// The offline flag exists because BLE has no goodbye of its own. Peers that
-/// are still connected keep reading our cached payload after we stop, and
-/// the flag is how they find out we're gone.
+/// are still connected keep reading our payload after we stop, and the flag
+/// is how they find out we're gone.
 ///
 /// The decoders never throw or crash on bad input; a short or garbled
 /// payload is just dropped.

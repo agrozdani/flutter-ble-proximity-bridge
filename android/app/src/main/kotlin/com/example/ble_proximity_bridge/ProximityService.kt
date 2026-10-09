@@ -5,6 +5,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.content.pm.ServiceInfo
@@ -28,6 +29,8 @@ import io.heraldprox.herald.sensor.datatype.SensorType
 import io.heraldprox.herald.sensor.datatype.TargetIdentifier
 import io.heraldprox.herald.sensor.datatype.TimeInterval
 import java.util.UUID
+import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicLong
 import java.util.concurrent.atomic.AtomicReference
 
 /**
@@ -45,25 +48,45 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
         private const val NOTIFICATION_CHANNEL_ID = "proximity_bridge_service"
         private const val NOTIFICATION_ID = 71
 
-        /** How often peers re-read our payload. Limits how stale cached data can get. */
+        /**
+         * How often we re-read a peer's payload. Every install uses the same
+         * value, so it also bounds how stale our payload can be on a peer.
+         */
         private val PAYLOAD_REFRESH = TimeInterval(15)
-
-        /** Gives the goodbye frame a moment to reach peers before we stop. */
-        private const val GOODBYE_FLUSH_MILLIS = 300L
 
         const val EXTRA_SESSION_ID = "sessionId"
         const val EXTRA_PEER_ID = "peerId"
         const val EXTRA_MOCK = "mock"
+        const val EXTRA_COMMAND = "command"
 
         // Flutter can subscribe before the service exists. Park the sink
         // here so onCreate can claim it later.
         private val instanceRef = AtomicReference<ProximityService?>()
         private val pendingSinkRef = AtomicReference<EventChannel.EventSink?>()
 
+        // startForegroundService() returns before onStartCommand runs, so a
+        // stop from Dart can arrive while its start is still in flight. Every
+        // start and stop takes a number; a start that is no longer the latest
+        // command when it is delivered was cancelled and must not run.
+        private val latestCommand = AtomicLong()
+
         fun instance(): ProximityService? = instanceRef.get()
+
+        /** Called by MainActivity for every start and stop, in call order. */
+        fun nextCommand(): Long = latestCommand.incrementAndGet()
 
         fun parkPendingSink(sink: EventChannel.EventSink?) {
             pendingSinkRef.set(sink)
+        }
+
+        /** The runtime permissions real BLE needs (none before Android 12). */
+        fun hasBluetoothPermissions(context: Context): Boolean {
+            if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
+            return listOf(
+                Manifest.permission.BLUETOOTH_SCAN,
+                Manifest.permission.BLUETOOTH_ADVERTISE,
+                Manifest.permission.BLUETOOTH_CONNECT,
+            ).all { context.checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
         }
     }
 
@@ -86,7 +109,11 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
     @Volatile
     private var sourceMode = SourceMode.IDLE
 
-    private var pendingQuiesce: Runnable? = null
+    // Herald's Android immediateSendAll connects to each recent peer in turn
+    // and blocks until each exchange finishes, which can take seconds. Frames
+    // go out on this thread so the main thread never waits on the radio. One
+    // thread keeps goodbye/hello frames in the order they were sent.
+    private val frameSender = Executors.newSingleThreadExecutor()
 
     // Herald calls us on worker threads. Flutter sink calls must happen on
     // the main thread and the sink can disappear at any time.
@@ -111,31 +138,53 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent == null) {
-            // After process death we may be restarted without the original
-            // extras. Stay alive and let Dart issue start again later.
+            // A START_STICKY restart after process death: the extras are gone
+            // and no Flutter engine is attached, so there is nothing to resume.
+            // The service idles until Dart starts it again, or until Android
+            // stops it as an idle background service.
             return START_STICKY
         }
 
         val sessionId = intent.getStringExtra(EXTRA_SESSION_ID)
         val peerId = intent.getLongExtra(EXTRA_PEER_ID, -1L)
         val mock = intent.getBooleanExtra(EXTRA_MOCK, false)
+        val command = intent.getLongExtra(EXTRA_COMMAND, -1L)
+
+        // A real-BLE start arrives via startForegroundService(), and a service
+        // started that way must call startForeground() before it stops or
+        // Android crashes the app. So promote first, then bail out if needed.
+        val superseded = command != latestCommand.get()
+        if (!mock && !promoteToForeground()) {
+            // A superseded start has nothing to report to the current session.
+            if (!superseded) failStart("Android refused to start the foreground service")
+            return START_NOT_STICKY
+        }
+        if (superseded) {
+            // Dart stopped (or restarted) before Android delivered this start.
+            Log.i(TAG, "Start was superseded before delivery; ignoring it")
+            stopForeground(STOP_FOREGROUND_REMOVE)
+            return START_NOT_STICKY
+        }
         if (sessionId == null || peerId < 0) {
-            Log.e(TAG, "Missing start extras; stopping")
-            stopSelf()
+            failStart("Missing start extras")
+            return START_NOT_STICKY
+        }
+        if (!mock && !hasBluetoothPermissions(this)) {
+            failStart("Bluetooth permissions are not granted")
             return START_NOT_STICKY
         }
 
-        // A quick restart during the goodbye window keeps the host running.
-        pendingQuiesce?.let { mainThread.removeCallbacks(it) }
-        pendingQuiesce = null
         mockSource?.stop()
         mockSource = null
         distanceEstimator.clear()
 
         if (mock) {
             // A racing stop may have left the BLE host running, so always
-            // quiesce it before switching to mock mode.
+            // quiesce it before switching to mock mode. An earlier BLE session
+            // the current Dart side never stopped (e.g. the app was swiped away
+            // and reopened) may also have left the notification up.
             quiesceBleHost()
+            stopForeground(STOP_FOREGROUND_REMOVE)
             // Mock mode has no transport, but the supplier still holds the
             // status this device broadcasts so updateStatus keeps working.
             // Reuse the BLE host's supplier if one exists — the host keeps
@@ -148,21 +197,28 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
             }
             startMockSource()
         } else {
-            if (!hasBluetoothPermissions()) {
-                Log.w(TAG, "Bluetooth permissions missing; stopping")
-                stopSelf()
-                return START_NOT_STICKY
-            }
-            promoteToForeground()
             startOrResumeBleHost(sessionId, peerId)
         }
         return START_STICKY
     }
 
+    /** Ends a start that cannot proceed and tells Dart, instead of leaving it to time out. */
+    private fun failStart(reason: String) {
+        Log.e(TAG, "Start failed: $reason")
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        emitError("start_failed", reason)
+        stopSelf()
+    }
+
     override fun onDestroy() {
-        // Real teardown: the cached host dies with the service.
-        pendingQuiesce?.let { mainThread.removeCallbacks(it) }
-        pendingQuiesce = null
+        // Android can destroy the service on its own, e.g. a mock-mode (plain,
+        // non-foreground) service about a minute after the app is backgrounded.
+        // Tell Dart so it does not keep showing a bridge that is gone.
+        if (isRunning) emitError("service_stopped", "Android stopped the proximity service")
+
+        // Real teardown: the cached host dies with the service. Frames already
+        // queued still go out; nothing new can be queued after this.
+        frameSender.shutdown()
         mockSource?.stop()
         mockSource = null
         sensorArray?.stop()
@@ -203,9 +259,10 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
             supplier.setOffline(false)
             sourceMode = SourceMode.BLE
             host.start()
-            // Tell connected peers we are back so they do not keep our
+            // Tell recently seen peers we are back so they do not keep our
             // cached offline payload until the next re-read.
-            host.immediateSendAll(supplier.currentFrame())
+            val hello = supplier.currentFrame()
+            frameSender.execute { host.immediateSendAll(hello) }
             sendReady()
             return
         }
@@ -221,14 +278,16 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
         }
 
         // The session UUID doubles as the BLE service UUID, so only devices
-        // on the same session find each other. Herald's standard service is
-        // disabled to keep this app isolated from other Herald traffic.
+        // on the same session find each other. Herald's standard and legacy
+        // (pre-2.1) services are disabled to keep this app isolated from
+        // other Herald traffic; legacy detection is on by default.
         BLESensorConfiguration.payloadDataUpdateTimeInterval = PAYLOAD_REFRESH
         BLESensorConfiguration.customServiceUUID = UUID.fromString(sessionId)
         BLESensorConfiguration.customServiceDetectionEnabled = true
         BLESensorConfiguration.customServiceAdvertisingEnabled = true
         BLESensorConfiguration.standardHeraldServiceDetectionEnabled = false
         BLESensorConfiguration.standardHeraldServiceAdvertisingEnabled = false
+        BLESensorConfiguration.legacyHeraldServiceDetectionEnabled = false
         BLESensorConfiguration.logLevel = SensorLoggerLevel.off
 
         val newSupplier = StatusPayloadSupplier(peerId)
@@ -247,26 +306,27 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
             bleHostSessionId = null
             payloadSupplier = null
             sourceMode = SourceMode.IDLE
-            stopSelf()
+            failStart("Herald failed to start: ${e.message}")
         }
     }
 
-    /** Flags us offline, sends goodbye frames, then stops the host after a short delay. */
+    /** Flags us offline, sends goodbye frames, then stops the host once they are out. */
     private fun quiesceBleHost() {
         val host = sensorArray ?: return
 
-        payloadSupplier?.let { supplier ->
+        val goodbye = payloadSupplier?.let { supplier ->
             supplier.setOffline(true)
-            host.immediateSendAll(supplier.currentFrame())
+            supplier.currentFrame()
         }
-
-        val quiesce = Runnable {
-            pendingQuiesce = null
-            // A BLE start raced in during the flush window, so leave it up.
-            if (sourceMode != SourceMode.BLE) host.stop()
+        frameSender.execute {
+            // Returns only after Herald has finished with every peer.
+            if (goodbye != null) host.immediateSendAll(goodbye)
+            mainThread.post {
+                // A BLE start raced in while the goodbye went out, so leave
+                // the host up.
+                if (sourceMode != SourceMode.BLE) host.stop()
+            }
         }
-        pendingQuiesce = quiesce
-        mainThread.postDelayed(quiesce, GOODBYE_FLUSH_MILLIS)
     }
 
     private fun startMockSource() {
@@ -389,11 +449,18 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
         mainThread.post { emit(hashMapOf<String, Any>("type" to "ready")) }
     }
 
-    private fun emit(event: Map<String, Any>) {
+    private fun emit(event: Map<String, Any>) = withSink { it.success(event) }
+
+    private fun emitError(code: String, message: String) {
+        mainThread.post { withSink { it.error(code, message, null) } }
+    }
+
+    /** Runs [send] against the current sink. Main thread only. */
+    private fun withSink(send: (EventChannel.EventSink) -> Unit) {
         synchronized(sinkLock) {
             val sink = eventSink ?: return
             try {
-                sink.success(event)
+                send(sink)
             } catch (e: Exception) {
                 // Engine teardown can invalidate the sink between the null
                 // check and the call, so drop it and stop trying.
@@ -420,18 +487,10 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
 
     // ----- Foreground promotion -------------------------------------------------
 
-    private fun hasBluetoothPermissions(): Boolean {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.S) return true
-        return listOf(
-            Manifest.permission.BLUETOOTH_SCAN,
-            Manifest.permission.BLUETOOTH_ADVERTISE,
-            Manifest.permission.BLUETOOTH_CONNECT,
-        ).all { checkSelfPermission(it) == PackageManager.PERMISSION_GRANTED }
-    }
-
-    private fun promoteToForeground() {
+    /** Returns false if Android refused the promotion. */
+    private fun promoteToForeground(): Boolean {
         val notification = buildNotification()
-        try {
+        return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
                 startForeground(
                     NOTIFICATION_ID,
@@ -441,11 +500,13 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
             } else {
                 startForeground(NOTIFICATION_ID, notification)
             }
+            true
         } catch (e: Exception) {
-            // Permissions may have been revoked after Dart checked them,
-            // which makes foreground promotion fail here.
+            // On Android 14+ the connectedDevice type is refused unless a
+            // Bluetooth permission is granted. MainActivity checks first, so
+            // this is a backstop rather than the normal path.
             Log.e(TAG, "Foreground promotion failed", e)
-            stopSelf()
+            false
         }
     }
 
