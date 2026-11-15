@@ -282,8 +282,9 @@ Two invariants, enforced on both platforms:
 
 ## Known limitations
 
-These come from Herald 2.2.0 or from deliberate scope limits, and are worth
-knowing before building on the bridge:
+These come from Herald 2.2.0, from deliberate scope limits, or from edge
+cases in the Dart controller, and are worth knowing before building on the
+bridge:
 
 - **Relayed payloads can resurrect a stopped iPhone.** Herald's payload
   sharing has Android devices relay the payloads of iOS peers they have read
@@ -294,9 +295,8 @@ knowing before building on the bridge:
   while the goodbye lasts (5 s for an iPhone), and only if it is
   byte-identical to the payload the receiver already holds for that peer:
   Herald reports any other relayed payload as a fresh read, which ends the
-  goodbye. Such
-  sightings also carry the *relay's* RSSI, so their distance is not the
-  relayed peer's. A sequence number in the payload would let receivers
+  goodbye. Such sightings also carry the *relay's* RSSI, so their distance
+  is not the relayed peer's. A sequence number in the payload would let receivers
   discard stale relays. The same path can hand a device its *own* older
   payload — the relay only skips a copy that is byte-identical to the
   peer's current one — which is why the pipeline drops any payload carrying
@@ -318,6 +318,21 @@ knowing before building on the bridge:
   Android app whose service survived a swipe-away, the next start broadcasts
   a new id; peers drop the old one by staleness eviction.
 - **No state restoration on iOS.** See [ios.md](ios.md#background-modes-and-state-restoration).
+- **A start that cuts a stop short keeps the old peer list.** `stop()`
+  clears the peer list only once its teardown finishes, and skips that when
+  a newer `start()` took over meanwhile; `start()` itself never clears it.
+  Peers from before the stop stay listed until a new sighting refreshes
+  them, a goodbye removes them, or the staleness eviction drops them
+  20–25 s after their last sighting. Only back-to-back calls hit this: in the demo the stop
+  comes from the mock-mode toggle in the error state and Start is a
+  separate tap, by which time the teardown (a stream cancel and one native
+  call) has normally finished.
+- **A start during a stop from the running state is dropped.** While a
+  `stop()` issued from the running (or starting) state tears down, the
+  bridge still reports that state, and `start()` returns without doing
+  anything; the bridge ends up idle, not restarted. The demo UI cannot do
+  this: it shows no Start button in those states, and the resume retry only
+  fires from the error state.
 
 ## What is deliberately *not* here
 
