@@ -2,10 +2,10 @@ package com.example.ble_proximity_bridge
 
 import io.heraldprox.herald.sensor.Device
 import io.heraldprox.herald.sensor.datatype.Data
+import io.heraldprox.herald.sensor.datatype.Int64
 import io.heraldprox.herald.sensor.datatype.PayloadData
 import io.heraldprox.herald.sensor.datatype.PayloadTimestamp
 import io.heraldprox.herald.sensor.datatype.UInt32
-import io.heraldprox.herald.sensor.datatype.UInt64
 import io.heraldprox.herald.sensor.datatype.UInt8
 import io.heraldprox.herald.sensor.payload.DefaultPayloadDataSupplier
 
@@ -45,7 +45,12 @@ class StatusPayloadSupplier(peerId: Long) : DefaultPayloadDataSupplier() {
 
         fun peerIdFrom(data: Data?): Long? {
             if (data == null || data.value.size < PAYLOAD_SIZE) return null
-            return data.uint64(OFFSET_PEER_ID)?.value
+            // Read the 8 bytes as a bit pattern (Herald's Int64), not through
+            // its UInt64: that type clamps anything with the top bit set to 0,
+            // while iOS decodes the same bytes as a negative id. Our own ids
+            // never get that large, but any device can broadcast one on our
+            // service UUID and both platforms must agree on what it decodes to.
+            return data.int64(OFFSET_PEER_ID)?.value
         }
 
         fun statusFrom(data: Data?): Int? {
@@ -89,6 +94,19 @@ class StatusPayloadSupplier(peerId: Long) : DefaultPayloadDataSupplier() {
         }
     }
 
+    /** The id we currently broadcast as. */
+    fun currentPeerId(): Long = synchronized(lock) { peerId }
+
+    /**
+     * Takes over the status and color of the supplier this one replaces, so
+     * a rebuilt host does not broadcast a blank status until Dart's next push.
+     */
+    fun adoptStatus(previous: StatusPayloadSupplier) {
+        val (previousStatus, previousColor) =
+            synchronized(previous.lock) { previous.status to previous.color }
+        update(previousStatus, previousColor)
+    }
+
     fun update(status: Int, color: Int) {
         synchronized(lock) {
             this.status = status
@@ -119,7 +137,8 @@ class StatusPayloadSupplier(peerId: Long) : DefaultPayloadDataSupplier() {
         }
 
         return PayloadData().apply {
-            append(UInt64(id))
+            // Bit-pattern write, matching the decoder above and iOS.
+            append(Int64(id))
             append(UInt8(statusNow))
             append(UInt8(colorNow))
             append(UInt8(DEVICE_KIND_ANDROID))

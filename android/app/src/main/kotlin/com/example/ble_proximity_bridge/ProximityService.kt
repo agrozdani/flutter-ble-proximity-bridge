@@ -54,6 +54,13 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
          */
         private val PAYLOAD_REFRESH = TimeInterval(15)
 
+        /**
+         * How long a goodbye/hello frame outvotes the payload Herald has
+         * cached for that peer. The next re-read replaces the cached copy
+         * within one refresh interval; two leaves room for a slow one.
+         */
+        private val FRAME_OVERRIDE_MILLIS = 2 * PAYLOAD_REFRESH.millis()
+
         const val EXTRA_SESSION_ID = "sessionId"
         const val EXTRA_PEER_ID = "peerId"
         const val EXTRA_MOCK = "mock"
@@ -97,6 +104,8 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
         private set
 
     val distanceEstimator = DistanceEstimator()
+
+    private val frameOverrides = FrameOverrides(FRAME_OVERRIDE_MILLIS)
 
     /** The Herald host. Rebuilt only when the session id changes. */
     private var sensorArray: SensorArray? = null
@@ -177,6 +186,7 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
         mockSource?.stop()
         mockSource = null
         distanceEstimator.clear()
+        frameOverrides.clearAll()
 
         if (mock) {
             // A racing stop may have left the BLE host running, so always
@@ -227,6 +237,7 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
         payloadSupplier = null
         sourceMode = SourceMode.IDLE
         distanceEstimator.clear()
+        frameOverrides.clearAll()
         // Only clear the singleton if we are still the active instance.
         instanceRef.compareAndSet(this, null)
         super.onDestroy()
@@ -241,6 +252,7 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
         // Flip the mode first so any late Herald callbacks get ignored.
         sourceMode = SourceMode.IDLE
         distanceEstimator.clear()
+        frameOverrides.clearAll()
         // The BLE host may still be up even if the current mode was mock.
         quiesceBleHost()
         // Keep the host and supplier around so lingering peers read the
@@ -262,10 +274,18 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
             // Tell recently seen peers we are back so they do not keep our
             // cached offline payload until the next re-read.
             val hello = supplier.currentFrame()
-            frameSender.execute { host.immediateSendAll(hello) }
+            frameSender.execute { sendFrame(host, hello) }
             sendReady()
             return
         }
+
+        // Whatever supplier exists at this point (an earlier session's, or
+        // mock mode's) holds the status Dart pushed last. On Android that
+        // push can even belong to *this* start: a start is delivered to the
+        // service asynchronously, and when the previous source was still
+        // running, Dart's subscription already got a replayed ready and may
+        // push its status before onStartCommand runs.
+        val previousSupplier = supplier
 
         // A new session id means a new service UUID, so the host has to be
         // rebuilt. The demo's fixed session id does not hit this path.
@@ -291,6 +311,7 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
         BLESensorConfiguration.logLevel = SensorLoggerLevel.off
 
         val newSupplier = StatusPayloadSupplier(peerId)
+        previousSupplier?.let { newSupplier.adoptStatus(it) }
         val newHost = SensorArray(applicationContext, newSupplier)
         newHost.add(this)
         payloadSupplier = newSupplier
@@ -320,12 +341,26 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
         }
         frameSender.execute {
             // Returns only after Herald has finished with every peer.
-            if (goodbye != null) host.immediateSendAll(goodbye)
+            if (goodbye != null) sendFrame(host, goodbye)
             mainThread.post {
                 // A BLE start raced in while the goodbye went out, so leave
                 // the host up.
                 if (sourceMode != SourceMode.BLE) host.stop()
             }
+        }
+    }
+
+    /**
+     * Pushes one goodbye/hello frame. Runs on [frameSender]. A frame is best
+     * effort: a failure inside Herald's blocking send is logged rather than
+     * thrown, because an exception escaping this worker thread would crash
+     * the app and, for a goodbye, skip the host stop that follows it.
+     */
+    private fun sendFrame(host: SensorArray, frame: PayloadData) {
+        try {
+            host.immediateSendAll(frame)
+        } catch (e: Exception) {
+            Log.w(TAG, "Sending a goodbye/hello frame failed", e)
         }
     }
 
@@ -351,19 +386,19 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
 
     override fun sensor(sensor: SensorType, didRead: PayloadData, fromTarget: TargetIdentifier) {
         // Payload read over GATT, no fresh RSSI in this callback.
-        handlePayload(didRead, proximity = null)
+        handlePayload(didRead, proximity = null, FrameOverrides.Source.READ)
     }
 
     override fun sensor(sensor: SensorType, didReceive: ImmediateSendData, fromTarget: TargetIdentifier) {
         // Goodbye/hello frames. Same 16-byte payload, same pipeline.
-        handlePayload(didReceive.data, proximity = null)
+        handlePayload(didReceive.data, proximity = null, FrameOverrides.Source.FRAME)
     }
 
     override fun sensor(sensor: SensorType, didShare: List<PayloadData>, fromTarget: TargetIdentifier) {
         // Payloads relayed by another peer. This helps with iOS background
         // advertising limits.
         for (payload in didShare) {
-            handlePayload(payload, proximity = null)
+            handlePayload(payload, proximity = null, FrameOverrides.Source.CACHED)
         }
     }
 
@@ -381,8 +416,10 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
         fromTarget: TargetIdentifier,
         withPayload: PayloadData,
     ) {
-        // The workhorse callback: payload and RSSI together.
-        handlePayload(withPayload, didMeasure)
+        // The workhorse callback: an RSSI reading together with the payload
+        // Herald last read from that peer, which can be up to a refresh
+        // interval old.
+        handlePayload(withPayload, didMeasure, FrameOverrides.Source.CACHED)
     }
 
     override fun sensor(sensor: SensorType, didUpdateState: SensorState) {
@@ -391,7 +428,11 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
 
     // ----- Sighting pipeline --------------------------------------------------
 
-    private fun handlePayload(data: Data, proximity: Proximity?) {
+    private fun handlePayload(
+        data: Data,
+        proximity: Proximity?,
+        source: FrameOverrides.Source,
+    ) {
         // Ignore anything from connections that outlived a stop.
         if (sourceMode != SourceMode.BLE) return
         val peerId = StatusPayloadSupplier.peerIdFrom(data)
@@ -406,12 +447,27 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
             return
         }
 
-        if (offline) {
-            // Peer said goodbye, or we read its cached offline payload.
+        // Never list ourselves. Herald's Android relay skips handing a peer
+        // its own payload by comparing bytes, so a copy that differs from the
+        // current one (an older status, an earlier offline flag) can come
+        // back to the device it describes. Herald 2.2.0 only relays to iOS
+        // peers, so on Android this is a mirror of the iOS check.
+        if (peerId == payloadSupplier?.currentPeerId()) return
+
+        // A goodbye/hello frame from this peer outvotes the copy Herald has
+        // cached for it; null means the frame already said it all.
+        val payload = frameOverrides.resolve(
+            peerId, source, FrameOverrides.Payload(status, color, deviceKind, offline),
+        ) ?: return
+
+        if (payload.offline) {
+            // Peer said goodbye, or its payload carries the offline flag.
             emitGone(peerId)
             return
         }
-        handleSighting(peerId, status, color, deviceKind, proximity?.value)
+        handleSighting(
+            peerId, payload.status, payload.color, payload.deviceKind, proximity?.value,
+        )
     }
 
     /** Common path for BLE and mock sightings. */

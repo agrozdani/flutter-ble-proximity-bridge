@@ -267,6 +267,52 @@ void main() {
     );
   });
 
+  test('a start issued while a stop is still tearing down reaches native '
+      'after that stop', () async {
+    // From the error phase the UI can call stop() (mock toggle) and start()
+    // back to back. Native handles commands in arrival order, so a stop
+    // that arrived after the new start would kill the new session. Nothing
+    // in start() waits for the teardown explicitly; it holds because the
+    // teardown reaches its native stop in no more async steps than start()
+    // needs to reach its native start. This pins that ordering.
+    late MockStreamHandlerEventSink sink;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockStreamHandler(
+          eventChannel,
+          MockStreamHandler.inline(
+            onListen: (arguments, events) {
+              sink = events;
+              events.success({BridgeEventKeys.type: BridgeEventKeys.typeReady});
+            },
+          ),
+        );
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final controller = container.read(bridgeProvider.notifier);
+
+    await controller.start(mock: true);
+    sink.error(code: 'service_stopped', message: 'service died');
+    await pumpEventQueue();
+    expect(container.read(bridgeProvider).phase, BridgePhase.error);
+    methodCalls.clear();
+
+    final stopping = controller.stop();
+    final starting = controller.start(mock: true);
+    await Future.wait([stopping, starting]);
+
+    expect(
+      methodCalls
+          .map((call) => call.method)
+          .where(
+            (method) =>
+                method == BridgeMethods.start || method == BridgeMethods.stop,
+          ),
+      [BridgeMethods.stop, BridgeMethods.start],
+    );
+    expect(container.read(bridgeProvider).phase, BridgePhase.running);
+  });
+
   test(
     'a status change made during the handshake still reaches native',
     () async {

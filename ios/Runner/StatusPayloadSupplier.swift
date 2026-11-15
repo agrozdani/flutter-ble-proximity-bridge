@@ -39,7 +39,7 @@ final class StatusPayloadSupplier: PayloadDataSupplier {
 
   init(peerId: Int) {
     // Bit-pattern conversion so a negative id round-trips instead of
-    // trapping — the Android encoder (Kotlin Long) has the same semantics.
+    // trapping — the Android encoder writes its Long the same way.
     self.peerId = UInt64(bitPattern: Int64(peerId))
   }
 
@@ -54,6 +54,20 @@ final class StatusPayloadSupplier: PayloadDataSupplier {
     lock.lock()
     defer { lock.unlock() }
     self.peerId = UInt64(bitPattern: Int64(peerId))
+  }
+
+  /// Takes over the status and color of the supplier this one replaces, so a
+  /// rebuilt host doesn't broadcast a blank status until Dart's next push.
+  func adoptStatus(from previous: StatusPayloadSupplier) {
+    previous.lock.lock()
+    let previousStatus = previous.status
+    let previousColor = previous.color
+    previous.lock.unlock()
+
+    lock.lock()
+    defer { lock.unlock() }
+    status = previousStatus
+    color = previousColor
   }
 
   /// While offline, every payload we serve carries the goodbye flag,
@@ -97,7 +111,8 @@ final class StatusPayloadSupplier: PayloadDataSupplier {
     }
     // Bit-pattern conversion, not Int(value): an id with the top bit set
     // (any device could broadcast one on our service UUID) must decode as
-    // a negative Int — matching Kotlin's signed Long — instead of trapping.
+    // a negative Int — the same value the Android decoder produces —
+    // instead of trapping.
     return Int(bitPattern: UInt(value))
   }
 
