@@ -165,7 +165,8 @@ offline flag; on stop the device sets it and pushes the flagged payload to
 its peers via Herald's immediate-send channel (`immediateSendAll` — public
 API), then quiesces the host once the frames are out. Receivers translate
 the flag into a `{type: "gone"}` event and remove the peer instantly. On
-restart, an online hello reverses it.
+restart, an online hello reverses it, where it can be delivered (an
+iPhone's usually cannot; see below).
 
 **PATTERN: a frame outvotes the cached payload.** A frame is pushed exactly
 because the receiver's copy of the payload is out of date — but Herald does
@@ -179,13 +180,37 @@ stopped. The pipeline therefore tracks where each payload came from
 (`FrameOverrides`): after a frame from a peer, payloads Herald only *holds*
 for that peer — the one attached to an RSSI reading, or a relayed copy — are
 replaced by what the frame said. A fresh read of the peer's payload ends the
-override, since that is newer than the frame; so does a timeout of two
-refresh intervals, in case that read never happens.
+override, since that is newer than the frame; so does a timeout, in case
+that read never happens. The timeout is two refresh intervals (30 s),
+except for a goodbye from an iPhone, which lasts 5 s: an iPhone stops
+advertising and sending keep-alive notifications 0.3 s after its goodbye
+(one keep-alive Herald already scheduled can still follow within 2 s), so
+apart from relayed copies (see [Known limitations](#known-limitations))
+only readings already under way can carry its old online payload, and
+holding the goodbye longer would hide the iPhone if it came back before
+the next re-read — its hello usually cannot say so (below). An Android
+sender keeps advertising while its blocking send works through its peers,
+so its goodbye keeps the full timeout.
 
 Which peers a frame reaches depends on Herald's platform implementations:
 
 - An **iOS sender** writes to the peers it is connected to as a central —
-  in practice its iOS peers, the ghost case above.
+  in practice its iOS peers, the ghost case above. Herald's receiver
+  `stop()` drops those connections, though (when it was scanning, the
+  normal case), and the hello goes out right after the next `start()`,
+  before any are re-established. So once a stop has outlasted the 0.3 s
+  flush window (a start within it cancels the host stop, so the hello
+  still goes out over those connections), an iPhone's hello typically
+  reaches no one (from Herald's source; not radio-tested). Its peers
+  should then pick it up
+  from its advertisements once the 5 s goodbye has passed, or from their
+  next payload re-read if they re-read its offline payload while it was
+  stopped. How quickly is not verified: Herald also rebuilds an iPhone's
+  GATT service each time it starts advertising, and a peer's Herald skips
+  rediscovery when told a service was invalidated, so that peer's
+  keep-alive subscription and payload re-reads may not recover until the
+  link drops (from Herald's source; how CoreBluetooth reports the rebuild
+  was not checked).
 - An **Android sender** connects to each Herald peer seen in the last minute
   in turn. That call blocks for the whole exchange, so the bridge sends from
   a background thread.
@@ -211,9 +236,10 @@ Three safety nets, in order of speed:
 
 ## Lifecycle
 
-- **Start**: subscribe → invoke `start` → await ready (10 s timeout) → push
-  current status → running (and push again if the status changed while the
-  first push was in flight).
+- **Start**: wait for a stop that is still tearing down (native runs
+  commands in arrival order) → subscribe → invoke `start` → await ready
+  (10 s timeout) → push current status → running (and push again if the
+  status changed while the first push was in flight).
 - **Stop**: cancel subscription → invoke `stop` (tolerating a
   `PlatformException`) → clear
   peer state → idle. Teardown is safe from any state because failures can
@@ -264,8 +290,11 @@ knowing before building on the bridge:
   to other iOS peers, for up to 5 minutes after last seeing them. A relay
   that never re-read the stopped iPhone's offline payload keeps relaying its
   last *online* one, so an iOS receiver can see the peer reappear after its
-  goodbye. (Herald reports a relayed payload it does not already hold as a
-  fresh read, so the frame-over-cache rule above cannot tell it apart.) Such
+  goodbye. The frame-over-cache rule above holds such a copy off only
+  while the goodbye lasts (5 s for an iPhone), and only if it is
+  byte-identical to the payload the receiver already holds for that peer:
+  Herald reports any other relayed payload as a fresh read, which ends the
+  goodbye. Such
   sightings also carry the *relay's* RSSI, so their distance is not the
   relayed peer's. A sequence number in the payload would let receivers
   discard stale relays. The same path can hand a device its *own* older

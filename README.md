@@ -434,12 +434,13 @@ The native tests cover the two pieces of native logic that need no radio
 either, with the same cases on both platforms:
 
 - `StatusPayloadSupplierTest.kt` / `StatusPayloadSupplierTests` (Swift) pin the
-  16-byte wire format against one shared set of golden bytes, so the Kotlin
-  and Swift codecs are checked against each other rather than only against
-  themselves.
+  16-byte wire format against one shared set of golden bytes: each encoder
+  must produce its own platform's bytes exactly, and each decoder is run on
+  the other platform's, so the Kotlin and Swift codecs are checked against
+  each other rather than only against themselves.
 - `FrameOverridesTest.kt` / `FrameOverridesTests` (Swift) cover the rule
   that lets a goodbye/hello frame outvote a cached payload until the next
-  fresh read.
+  fresh read or its timeout (shorter for a goodbye from an iPhone).
 
 ## Adapting it for your own app
 

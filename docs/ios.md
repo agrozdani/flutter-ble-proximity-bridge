@@ -103,8 +103,12 @@ Logical stop flags the payload offline, pushes a goodbye over
 connected to as a central — then calls `stop()` on the persistent host after
 a 300 ms flush window, since those writes are queued asynchronously
 (cancelled if a start races in). Logical start calls `start()` on the same
-instance and pushes a hello. The only path that rebuilds the host is a
-session-id change, since the advertised service UUID must change with it.
+instance and pushes a hello — which, once a stop has outlasted that flush
+window, typically finds no peer to write to, since Herald's `stop()`
+dropped this device's central connections (see
+[architecture.md](architecture.md#stopping-is-a-protocol-problem)). The
+only path that rebuilds the host is a session-id change, since the
+advertised service UUID must change with it.
 
 ## The Herald patches
 

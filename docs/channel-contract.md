@@ -112,9 +112,9 @@ the peer immediately instead of waiting out the staleness eviction.
 
 This event exists because BLE itself has no goodbye. A stopped peripheral
 cannot force-disconnect centrals that are already connected to it, and those
-centrals keep measuring it over the live link and reporting it with the
-payload they last read — so without an explicit signal, a stopped device
-would appear alive indefinitely. The
+centrals keep re-reading its payload over the live link (the stopped stack
+still answers) and reporting each read — so without an explicit signal, a
+stopped device would appear alive indefinitely. The
 native side emits `gone` whenever a peer's payload or immediate-send frame
 carries the offline flag (see the wire payload below and
 [architecture.md](architecture.md#stopping-is-a-protocol-problem)).
@@ -123,8 +123,9 @@ Android does not deliver them.
 
 After a goodbye frame, the native side stops reporting that peer from
 payloads the BLE library merely has cached, until the peer's payload is read
-afresh — otherwise the cached online copy would bring the peer straight
-back. The same applies in reverse after a hello.
+afresh or a timeout passes (5 s for a goodbye from an iPhone, 30 s
+otherwise) — otherwise the cached online copy would bring the peer
+straight back. The same applies in reverse after a hello.
 
 ### `{type: "peer", ...}`
 
