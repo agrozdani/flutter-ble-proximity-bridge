@@ -127,14 +127,19 @@ Herald 2.2.0's source and CoreBluetooth's API surface:
    reading together with the payload it last read from that peer. A stopped
    iPhone cannot shed the peers connected to it: `CBPeripheralManager` has no
    API to disconnect an inbound central, and Herald's transmitter `stop()`
-   only stops advertising — the GATT service stays published and keeps
-   answering payload reads. Herald's receiver-side cleanup (stop scanning,
-   disconnect peripherals) is guarded by `central.isScanning` and skipped
-   entirely when scanning was not active at that moment — Bluetooth not yet
-   on, a stop before the first scan, a second stop. Because the enabled flag
-   is cleared first, scanning never resumes, so retrying stop cannot help.
-   Result: a peer connected to a "stopped" iPhone keeps receiving fresh RSSI
-   readings for it, paired with its last-read status, indefinitely.
+   only stops advertising and its keep-alive notifications — the GATT service
+   stays published and keeps answering payload reads. Herald's receiver-side
+   cleanup (stop scanning, disconnect peripherals) is guarded by
+   `central.isScanning` and skipped entirely when scanning was not active at
+   that moment — Bluetooth not yet on, a stop before the first scan, a second
+   stop. Because the enabled flag is cleared first, scanning never resumes,
+   so retrying stop cannot help.
+   Result: a peer connected to a "stopped" iPhone keeps re-reading its
+   payload over the surviving link (every `payloadDataUpdateTimeInterval`,
+   15 s here), gets an answer each time, and reports each read as a sighting
+   — so the stopped iPhone never goes stale. (RSSI readings on that link do
+   stop: Herald's iOS receiver takes them when the peer's transmitter sends a
+   keep-alive notification, and a stopped transmitter sends none.)
 2. **Rebuilding the stack races its own teardown.** Herald creates its
    CoreBluetooth managers with fixed state-restoration identifiers, and its
    stop is partial (above). Creating a second `SensorArray` while the first
@@ -160,20 +165,66 @@ offline flag; on stop the device sets it and pushes the flagged payload to
 its peers via Herald's immediate-send channel (`immediateSendAll` — public
 API), then quiesces the host once the frames are out. Receivers translate
 the flag into a `{type: "gone"}` event and remove the peer instantly. On
-restart, an online hello reverses it.
+restart, an online hello reverses it, where it can be delivered (an
+iPhone's usually cannot; see below).
+
+**PATTERN: a frame outvotes the cached payload.** A frame is pushed exactly
+because the receiver's copy of the payload is out of date — but Herald does
+not update that copy from a frame. It keeps handing over every RSSI reading
+together with the payload it last *read*, until its next re-read. Taken at
+face value, that stale copy overrules the frame on the very next reading: a
+peer that just said goodbye comes back with its old online payload (it is
+still advertising for a moment while it winds down), and a peer that just
+said hello is removed again by the offline payload cached while it was
+stopped. The pipeline therefore tracks where each payload came from
+(`FrameOverrides`): after a frame from a peer, payloads Herald only *holds*
+for that peer — the one attached to an RSSI reading, or a relayed copy — are
+replaced by what the frame said. A fresh read of the peer's payload ends the
+override, since that is newer than the frame; so does a timeout, in case
+that read never happens. The timeout is two refresh intervals (30 s),
+except for a goodbye from an iPhone, which lasts 5 s: an iPhone stops
+advertising and sending keep-alive notifications 0.3 s after its goodbye
+(one keep-alive Herald already scheduled can still follow within 2 s), so
+apart from relayed copies (see [Known limitations](#known-limitations))
+only readings already under way can carry its old online payload, and
+holding the goodbye longer would hide the iPhone if it came back before
+the next re-read — its hello usually cannot say so (below). An Android
+sender keeps advertising while its blocking send works through its peers,
+so its goodbye keeps the full timeout.
 
 Which peers a frame reaches depends on Herald's platform implementations:
 
 - An **iOS sender** writes to the peers it is connected to as a central —
-  in practice its iOS peers, the ghost case above.
+  in practice its iOS peers, the ghost case above. Herald's receiver
+  `stop()` drops those connections, though (when it was scanning, the
+  normal case), and the hello goes out right after the next `start()`,
+  before any are re-established. So once a stop has outlasted the 0.3 s
+  flush window (a start within it cancels the host stop, so the hello
+  still goes out over those connections), an iPhone's hello typically
+  reaches no one (from Herald's source; not radio-tested). Its peers
+  should then pick it up
+  from its advertisements once the 5 s goodbye has passed, or from their
+  next payload re-read if they re-read its offline payload while it was
+  stopped. How quickly is not verified: Herald also rebuilds an iPhone's
+  GATT service each time it starts advertising, and a peer's Herald skips
+  rediscovery when told a service was invalidated, so that peer's
+  keep-alive subscription and payload re-reads may not recover until the
+  link drops (from Herald's source; how CoreBluetooth reports the rebuild
+  was not checked).
 - An **Android sender** connects to each Herald peer seen in the last minute
   in turn. That call blocks for the whole exchange, so the bridge sends from
   a background thread.
 - Only **iOS receivers** deliver the frame: Herald 2.2.0 for Android decodes
   immediate-send writes but never passes them to the delegate. Android
-  receivers rely on the nets below — which suffices, because Android Herald
-  does not hold connections open: once a stopped peer stops advertising,
-  its sightings simply stop.
+  receivers rely on the nets below. Android Herald does not hold connections
+  open and takes its RSSI from scan results, so a stopped Android peer —
+  which stops advertising and closes its GATT server — simply stops being
+  sighted and goes stale. A stopped iPhone can keep turning up in an Android
+  scan: Herald's Android scan filter also matches any Apple manufacturer
+  advertisement, and a known address is reported with the payload last read
+  from it. (Whether a stopped iPhone keeps advertising from the same address
+  is up to iOS and was not verified here.) In that case the offline flag in
+  the next payload re-read is what removes it.
 
 Three safety nets, in order of speed:
 
@@ -185,9 +236,10 @@ Three safety nets, in order of speed:
 
 ## Lifecycle
 
-- **Start**: subscribe → invoke `start` → await ready (10 s timeout) → push
-  current status → running (and push again if the status changed while the
-  first push was in flight).
+- **Start**: wait for a stop that is still tearing down (native runs
+  commands in arrival order) → subscribe → invoke `start` → await ready
+  (10 s timeout) → push current status → running (and push again if the
+  status changed while the first push was in flight).
 - **Stop**: cancel subscription → invoke `stop` (tolerating a
   `PlatformException`) → clear
   peer state → idle. Teardown is safe from any state because failures can
@@ -230,17 +282,25 @@ Two invariants, enforced on both platforms:
 
 ## Known limitations
 
-These come from Herald 2.2.0 or from deliberate scope limits, and are worth
-knowing before building on the bridge:
+These come from Herald 2.2.0, from deliberate scope limits, or from edge
+cases in the Dart controller, and are worth knowing before building on the
+bridge:
 
 - **Relayed payloads can resurrect a stopped iPhone.** Herald's payload
   sharing has Android devices relay the payloads of iOS peers they have read
   to other iOS peers, for up to 5 minutes after last seeing them. A relay
   that never re-read the stopped iPhone's offline payload keeps relaying its
   last *online* one, so an iOS receiver can see the peer reappear after its
+  goodbye. The frame-over-cache rule above holds such a copy off only
+  while the goodbye lasts (5 s for an iPhone), and only if it is
+  byte-identical to the payload the receiver already holds for that peer:
+  Herald reports any other relayed payload as a fresh read, which ends the
   goodbye. Such sightings also carry the *relay's* RSSI, so their distance
-  is not the relayed peer's. A sequence number in the payload would let
-  receivers discard stale relays.
+  is not the relayed peer's. A sequence number in the payload would let receivers
+  discard stale relays. The same path can hand a device its *own* older
+  payload — the relay only skips a copy that is byte-identical to the
+  peer's current one — which is why the pipeline drops any payload carrying
+  the device's own id.
 - **Android keeps the CPU awake while the process lives.** Every Herald
   `SensorArray` on Android creates a timer that acquires a partial wake
   lock and releases it only in a finalizer. The timer's thread never ends
@@ -258,6 +318,21 @@ knowing before building on the bridge:
   Android app whose service survived a swipe-away, the next start broadcasts
   a new id; peers drop the old one by staleness eviction.
 - **No state restoration on iOS.** See [ios.md](ios.md#background-modes-and-state-restoration).
+- **A start that cuts a stop short keeps the old peer list.** `stop()`
+  clears the peer list only once its teardown finishes, and skips that when
+  a newer `start()` took over meanwhile; `start()` itself never clears it.
+  Peers from before the stop stay listed until a new sighting refreshes
+  them, a goodbye removes them, or the staleness eviction drops them
+  20–25 s after their last sighting. Only back-to-back calls hit this: in the demo the stop
+  comes from the mock-mode toggle in the error state and Start is a
+  separate tap, by which time the teardown (a stream cancel and one native
+  call) has normally finished.
+- **A start during a stop from the running state is dropped.** While a
+  `stop()` issued from the running (or starting) state tears down, the
+  bridge still reports that state, and `start()` returns without doing
+  anything; the bridge ends up idle, not restarted. The demo UI cannot do
+  this: it shows no Start button in those states, and the resume retry only
+  fires from the error state.
 
 ## What is deliberately *not* here
 

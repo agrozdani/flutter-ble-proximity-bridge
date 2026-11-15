@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:ble_proximity_bridge/src/bridge/channel_names.dart';
 import 'package:ble_proximity_bridge/src/models/peer.dart';
 import 'package:ble_proximity_bridge/src/providers/bridge_provider.dart';
@@ -265,6 +267,63 @@ void main() {
       methodCalls.where((call) => call.method == BridgeMethods.stop),
       hasLength(1),
     );
+  });
+
+  test('a start issued while a stop is still tearing down waits for that '
+      'stop', () async {
+    // From the error phase the UI can call stop() (mock toggle) and start()
+    // back to back. Native handles commands in arrival order, so a stop
+    // that arrived after the new start would kill the new session. start()
+    // waits for the teardown to finish; holding the native stop open here
+    // shows the new start cannot overtake it.
+    late MockStreamHandlerEventSink sink;
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockStreamHandler(
+          eventChannel,
+          MockStreamHandler.inline(
+            onListen: (arguments, events) {
+              sink = events;
+              events.success({BridgeEventKeys.type: BridgeEventKeys.typeReady});
+            },
+          ),
+        );
+
+    final container = ProviderContainer();
+    addTearDown(container.dispose);
+    final controller = container.read(bridgeProvider.notifier);
+
+    await controller.start(mock: true);
+    sink.error(code: 'service_stopped', message: 'service died');
+    await pumpEventQueue();
+    expect(container.read(bridgeProvider).phase, BridgePhase.error);
+    methodCalls.clear();
+
+    // The native stop does not reply until the test releases it.
+    final stopReply = Completer<void>();
+    TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
+        .setMockMethodCallHandler(methodChannel, (call) async {
+          methodCalls.add(call);
+          if (call.method == BridgeMethods.stop) await stopReply.future;
+          return call.method == BridgeMethods.start ? true : null;
+        });
+    List<String> startsAndStops() => methodCalls
+        .map((call) => call.method)
+        .where(
+          (method) =>
+              method == BridgeMethods.start || method == BridgeMethods.stop,
+        )
+        .toList();
+
+    final stopping = controller.stop();
+    final starting = controller.start(mock: true);
+    await pumpEventQueue();
+    expect(startsAndStops(), [BridgeMethods.stop]);
+
+    stopReply.complete();
+    await Future.wait([stopping, starting]);
+
+    expect(startsAndStops(), [BridgeMethods.stop, BridgeMethods.start]);
+    expect(container.read(bridgeProvider).phase, BridgePhase.running);
   });
 
   test(

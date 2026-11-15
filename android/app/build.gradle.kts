@@ -49,4 +49,8 @@ dependencies {
     // Herald handles BLE scanning, advertising, and payload exchange.
     // https://heraldprox.io — Apache 2.0, fetched from Maven Central.
     implementation("io.heraldprox:herald:2.2.0")
+
+    // JVM unit tests for the payload codec and the frame bookkeeping
+    // (src/test): ./gradlew :app:testDebugUnitTest
+    testImplementation("junit:junit:4.13.2")
 }

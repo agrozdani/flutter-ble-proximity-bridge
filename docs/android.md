@@ -9,6 +9,7 @@ Files: `android/app/src/main/kotlin/com/example/ble_proximity_bridge/`
 | `StatusPayloadSupplier.kt` | 16-byte payload encode/decode |
 | `DistanceEstimator.kt` | Per-peer window → median → Kalman → bucket |
 | `KalmanFilter1D.kt` | Small 1-D Kalman-style smoothing filter |
+| `FrameOverrides.kt` | Lets a goodbye/hello frame outvote a cached payload |
 | `MockPeerSource.kt` | Synthetic sightings for emulators |
 
 ## Why a foreground service
@@ -75,13 +76,16 @@ finishes — seconds per peer. Called on the main thread it would freeze the
 UI on every Stop and Start. The service hands frames to a single-thread
 executor (which also keeps goodbye and hello in order) and posts the host
 `stop()` back to the main thread once the goodbye returns, skipping it if a
-start raced in meanwhile.
+start raced in meanwhile. A frame is best effort, so an exception out of
+Herald's send is logged, not thrown: uncaught on a worker thread it would
+crash the app, and for a goodbye it would skip the host `stop()`.
 
 Note that Herald 2.2.0 for Android *receives* immediate-send frames but
 never delivers them to the delegate (the call is commented out in its GATT
 server), so `didReceive` never fires here: goodbye/hello frames from this
 device reach iOS peers only, and Android peers drop a stopped device by
-staleness eviction.
+staleness eviction. `FrameOverrides` is wired into the pipeline exactly as
+on iOS, but with no frames arriving it never has anything to override here.
 
 ## The pending-sink race
 

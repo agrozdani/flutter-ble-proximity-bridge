@@ -60,6 +60,10 @@ class BridgeController extends Notifier<BridgeState> {
   /// or state write would clobber the newer session.
   int _generation = 0;
 
+  /// The latest teardown (from stop() or a failed start()). start() waits
+  /// for it so a stop that is still tearing down reaches native first.
+  Future<void> _lastTeardown = Future<void>.value();
+
   @override
   BridgeState build() {
     _lifecycle = AppLifecycleListener(onResume: _onAppResumed);
@@ -89,6 +93,13 @@ class BridgeController extends Notifier<BridgeState> {
     // that surface as an unhandled error in the gap.
     ready.future.ignore();
     await _subscription?.cancel();
+    // Native runs commands in arrival order: a stop still tearing down that
+    // reached native after this start would end the new session.
+    try {
+      await _lastTeardown;
+    } on Object {
+      // Whoever started that teardown gets its error.
+    }
     if (generation != _generation) return;
     _subscription = ref
         .read(eventChannelProvider)
@@ -200,7 +211,9 @@ class BridgeController extends Notifier<BridgeState> {
     }
   }
 
-  Future<void> _teardown() async {
+  Future<void> _teardown() => _lastTeardown = _runTeardown();
+
+  Future<void> _runTeardown() async {
     // Detach everything synchronously, before the first await, so a start()
     // that runs during teardown installs fresh state instead of having it
     // cleared out from under it.
