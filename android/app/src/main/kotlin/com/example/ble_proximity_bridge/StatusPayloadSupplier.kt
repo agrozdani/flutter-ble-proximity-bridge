@@ -31,6 +31,7 @@ import io.heraldprox.herald.sensor.payload.DefaultPayloadDataSupplier
 class StatusPayloadSupplier(peerId: Long) : DefaultPayloadDataSupplier() {
 
     companion object {
+        const val DEVICE_KIND_IOS = 0
         const val DEVICE_KIND_ANDROID = 1
         const val PROTOCOL_VERSION = 2L
         const val FLAG_OFFLINE = 0x01

@@ -28,10 +28,16 @@ final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler 
   /// Gives the goodbye frame a moment to reach peers before we stop.
   private static let goodbyeFlushSeconds: Foundation.TimeInterval = 0.3
 
-  /// How long a goodbye/hello frame outvotes the payload Herald has cached
-  /// for that peer. The next re-read replaces the cached copy within one
-  /// refresh interval; two leaves room for a slow one.
+  /// How long a hello, or a goodbye from an Android device, outvotes the
+  /// payload Herald has cached for that peer. The next re-read replaces the
+  /// cached copy within one refresh interval; two leaves room for a slow one.
   private static let frameOverrideSeconds = 2 * payloadRefreshSeconds
+
+  /// The same for a goodbye from an iPhone, which stops advertising
+  /// `goodbyeFlushSeconds` after sending it; see FrameOverrides. 5 s covers
+  /// that, one keep-alive notification Herald may already have scheduled
+  /// (it sends them 2 s apart), and slack.
+  private static let iphoneGoodbyeOverrideSeconds: Foundation.TimeInterval = 5
 
   private enum SourceMode {
     case idle
@@ -41,7 +47,8 @@ final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler 
 
   private(set) var payloadSupplier: StatusPayloadSupplier?
   let distanceEstimator = DistanceEstimator()
-  private let frameOverrides = FrameOverrides(ttlSeconds: frameOverrideSeconds)
+  private let frameOverrides = FrameOverrides(
+    ttlSeconds: frameOverrideSeconds, iphoneGoodbyeTtlSeconds: iphoneGoodbyeOverrideSeconds)
 
   /// The Herald host, kept for the life of the process. Only a session id
   /// change rebuilds it.

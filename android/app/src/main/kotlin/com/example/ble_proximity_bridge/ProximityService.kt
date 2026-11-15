@@ -55,11 +55,28 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
         private val PAYLOAD_REFRESH = TimeInterval(15)
 
         /**
-         * How long a goodbye/hello frame outvotes the payload Herald has
-         * cached for that peer. The next re-read replaces the cached copy
-         * within one refresh interval; two leaves room for a slow one.
+         * How long a hello, or a goodbye from an Android device, outvotes
+         * the payload Herald has cached for that peer. The next re-read
+         * replaces the cached copy within one refresh interval; two leaves
+         * room for a slow one.
          */
         private val FRAME_OVERRIDE_MILLIS = 2 * PAYLOAD_REFRESH.millis()
+
+        /**
+         * The same for a goodbye from an iPhone, which stops advertising
+         * 0.3 s after sending it (goodbyeFlushSeconds in
+         * ProximityController.swift); see FrameOverrides. 5 s covers that,
+         * one keep-alive notification Herald may already have scheduled
+         * (it sends them 2 s apart), and slack.
+         *
+         * Unused in practice here, since Herald 2.2.0 for Android never
+         * delivers frames; kept identical to iOS. If a Herald release does
+         * deliver them, revisit this for Android receivers: a stopped
+         * iPhone may keep turning up in Herald's Android scan through its
+         * other Apple adverts (see docs/architecture.md), and 5 s would
+         * let those readings bring it back sooner than 30 s would.
+         */
+        private const val IPHONE_GOODBYE_OVERRIDE_MILLIS = 5_000L
 
         const val EXTRA_SESSION_ID = "sessionId"
         const val EXTRA_PEER_ID = "peerId"
@@ -105,7 +122,8 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
 
     val distanceEstimator = DistanceEstimator()
 
-    private val frameOverrides = FrameOverrides(FRAME_OVERRIDE_MILLIS)
+    private val frameOverrides =
+        FrameOverrides(FRAME_OVERRIDE_MILLIS, IPHONE_GOODBYE_OVERRIDE_MILLIS)
 
     /** The Herald host. Rebuilt only when the session id changes. */
     private var sensorArray: SensorArray? = null

@@ -13,15 +13,29 @@ import Foundation
 /// So a frame is remembered per peer and outvotes cached payloads until a
 /// fresh read of that peer's payload supersedes it. Entries also expire, so a
 /// frame can't outvote the payload forever if that read never happens.
+///
+/// A goodbye from an iPhone expires much sooner (`iphoneGoodbyeTtlSeconds`).
+/// An iPhone stops advertising and sending keep-alive notifications 0.3 s
+/// after its goodbye (one keep-alive already scheduled can still follow
+/// within 2 s), so apart from copies relayed by other peers, only readings
+/// already under way can still carry its old online payload, and those end
+/// within a few seconds. Holding the goodbye longer would hide the peer if it
+/// restarts before our next re-read, and its hello can't be counted on to
+/// end the goodbye early: Herald's iOS immediateSendAll only reaches peers
+/// the sender is connected to as a central, and Herald's stop() drops those
+/// connections. An Android sender keeps advertising while its blocking send
+/// works through its peers, so its goodbye keeps the full `ttlSeconds`.
 final class FrameOverrides {
 
   /// Where Herald got the payload it is handing over.
   enum Source {
-    /// Just read from the peer itself (or written to us by it).
+    /// Just read from the peer, or written to us by it. A relayed payload
+    /// Herald doesn't already hold also arrives as a read.
     case read
     /// A goodbye/hello frame the peer pushed to us.
     case frame
-    /// Herald's stored copy, or a copy relayed by another peer: possibly stale.
+    /// Herald's stored copy, attached to an RSSI reading, or a payload in a
+    /// relayed list: possibly stale.
     case cached
   }
 
@@ -34,16 +48,21 @@ final class FrameOverrides {
   }
 
   private let ttlSeconds: Double
+  private let iphoneGoodbyeTtlSeconds: Double
   private let now: () -> Double
   private let lock = NSLock()
-  private var entries: [Int: (frame: Payload, recordedAt: Double)] = [:]
+  private var entries: [Int: (frame: Payload, recordedAt: Double, lifetime: Double)] = [:]
 
-  /// `now` is a monotonic clock in seconds; tests inject their own.
+  /// `ttlSeconds` is how long a frame outvotes cached payloads if no fresh
+  /// read ends it; `iphoneGoodbyeTtlSeconds` the same for a goodbye sent by
+  /// an iPhone. `now` is a monotonic clock in seconds; tests inject their own.
   init(
     ttlSeconds: Double,
+    iphoneGoodbyeTtlSeconds: Double,
     now: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime }
   ) {
     self.ttlSeconds = ttlSeconds
+    self.iphoneGoodbyeTtlSeconds = iphoneGoodbyeTtlSeconds
     self.now = now
   }
 
@@ -58,7 +77,7 @@ final class FrameOverrides {
       // Newer than any frame, so the frame's job is done.
       entries.removeValue(forKey: peerId)
     case .frame:
-      entries[peerId] = (payload, now())
+      entries[peerId] = (payload, now(), lifetime(of: payload))
     case .cached:
       guard let frame = unexpiredFrame(peerId: peerId) else { return payload }
       // After a hello, report the peer as the frame described it.
@@ -73,10 +92,15 @@ final class FrameOverrides {
     entries.removeAll()
   }
 
+  private func lifetime(of frame: Payload) -> Double {
+    let fromIphone = frame.deviceKind == Int(StatusPayloadSupplier.deviceKindIOS)
+    return frame.offline && fromIphone ? iphoneGoodbyeTtlSeconds : ttlSeconds
+  }
+
   /// Call with the lock held.
   private func unexpiredFrame(peerId: Int) -> Payload? {
     guard let entry = entries[peerId] else { return nil }
-    if now() - entry.recordedAt > ttlSeconds {
+    if now() - entry.recordedAt > entry.lifetime {
       entries.removeValue(forKey: peerId)
       return nil
     }

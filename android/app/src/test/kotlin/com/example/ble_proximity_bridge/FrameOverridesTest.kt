@@ -10,11 +10,24 @@ import org.junit.Test
 class FrameOverridesTest {
 
     private var clock = 0L
-    private val overrides = FrameOverrides(ttlMillis = 30_000L, now = { clock })
+    private val overrides = FrameOverrides(
+        ttlMillis = 30_000L,
+        iphoneGoodbyeTtlMillis = 5_000L,
+        now = { clock },
+    )
 
-    private val online = Payload(status = 1, color = 2, deviceKind = 0, offline = false)
+    // Sent by an Android device, so its frames get the full lifetime.
+    private val online = Payload(
+        status = 1,
+        color = 2,
+        deviceKind = StatusPayloadSupplier.DEVICE_KIND_ANDROID,
+        offline = false,
+    )
     private val offline = online.copy(offline = true)
     private val onlineNewStatus = online.copy(status = 3)
+
+    private val iphoneOnline = online.copy(deviceKind = StatusPayloadSupplier.DEVICE_KIND_IOS)
+    private val iphoneOffline = iphoneOnline.copy(offline = true)
 
     @Test
     fun `without a frame every payload is taken at face value`() {
@@ -76,6 +89,31 @@ class FrameOverridesTest {
         // Expiry removed the entry rather than just hiding it.
         clock = 0L
         assertEquals(online, overrides.resolve(7, Source.CACHED, online))
+    }
+
+    @Test
+    fun `a goodbye from an iPhone expires after its shorter lifetime`() {
+        overrides.resolve(7, Source.FRAME, iphoneOffline)
+
+        clock = 5_000L
+        assertNull(overrides.resolve(7, Source.CACHED, iphoneOnline))
+
+        // A restart the hello never announced shows up again.
+        clock = 5_001L
+        assertEquals(iphoneOnline, overrides.resolve(7, Source.CACHED, iphoneOnline))
+    }
+
+    @Test
+    fun `a hello from an iPhone keeps the full lifetime`() {
+        overrides.resolve(7, Source.FRAME, iphoneOffline)
+        clock = 1_000L
+        overrides.resolve(7, Source.FRAME, iphoneOnline)
+
+        clock = 31_000L
+        assertEquals(iphoneOnline, overrides.resolve(7, Source.CACHED, iphoneOffline))
+
+        clock = 31_001L
+        assertEquals(iphoneOffline, overrides.resolve(7, Source.CACHED, iphoneOffline))
     }
 
     @Test

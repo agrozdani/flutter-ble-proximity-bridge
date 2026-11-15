@@ -4,44 +4,54 @@ import XCTest
 
 @testable import Runner
 
-/// Pins the 16-byte wire format. The byte arrays are the same ones the
-/// Android tests (StatusPayloadSupplierTest.kt) use, so the two codecs are
-/// checked against one set of golden bytes.
+/// Pins the 16-byte wire format. StatusPayloadSupplierTest.kt on Android
+/// holds the same four byte arrays: each platform's encoder must produce its
+/// own pair exactly, and its decoder is run on the other platform's pair, so
+/// the two codecs are checked against each other.
 class StatusPayloadSupplierTests: XCTestCase {
 
+  // Peer id 0x51C0FFEE (three of its bytes are >= 0x80, so a decoder that
+  // sign-extends bytes fails), status 2, color 5, protocol version 2.
+  private let iosOnline: [UInt8] = [
+    0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0,  // peer id, little-endian
+    2,  // status
+    5,  // color
+    0,  // device kind: iOS
+    0,  // flags
+    2, 0, 0, 0,  // protocol version
+  ]
+  private let iosOffline: [UInt8] = [
+    0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 0, 1, 2, 0, 0, 0,
+  ]
+  private let androidOnline: [UInt8] = [
+    0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 1, 0, 2, 0, 0, 0,
+  ]
+  private let androidOffline: [UInt8] = [
+    0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 1, 1, 2, 0, 0, 0,
+  ]
+
   func testEncodesTheDocumentedLayout() throws {
-    let supplier = StatusPayloadSupplier(peerId: 0x1A2B_3C4D)
+    let supplier = StatusPayloadSupplier(peerId: 0x51C0_FFEE)
     supplier.update(status: 2, color: 5)
 
-    let payload = try XCTUnwrap(supplier.currentFrame())
-    XCTAssertEqual(
-      [UInt8](payload),
-      [
-        0x4D, 0x3C, 0x2B, 0x1A, 0, 0, 0, 0,  // peer id, little-endian
-        2,  // status
-        5,  // color
-        0,  // device kind: iOS
-        0,  // flags
-        2, 0, 0, 0,  // protocol version
-      ])
+    XCTAssertEqual([UInt8](try XCTUnwrap(supplier.currentFrame())), iosOnline)
 
     supplier.setOffline(true)
-    XCTAssertEqual(try XCTUnwrap(supplier.currentFrame())[11], 1)
+    XCTAssertEqual([UInt8](try XCTUnwrap(supplier.currentFrame())), iosOffline)
   }
 
-  func testDecodesAPayloadWrittenByAndroid() {
-    let data = Data([
-      0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0,
-      3, 4, 1, 1,
-      2, 0, 0, 0,
-    ])
+  func testDecodesTheBytesTheAndroidEncoderProduces() {
+    let online = Data(androidOnline)
+    XCTAssertEqual(StatusPayloadSupplier.peerId(from: online), 0x51C0_FFEE)
+    XCTAssertEqual(StatusPayloadSupplier.status(from: online), 2)
+    XCTAssertEqual(StatusPayloadSupplier.color(from: online), 5)
+    XCTAssertEqual(StatusPayloadSupplier.deviceKind(from: online), 1)
+    XCTAssertEqual(StatusPayloadSupplier.isOffline(from: online), false)
+    XCTAssertEqual(StatusPayloadSupplier.version(from: online), 2)
 
-    XCTAssertEqual(StatusPayloadSupplier.peerId(from: data), 0x51C0_FFEE)
-    XCTAssertEqual(StatusPayloadSupplier.status(from: data), 3)
-    XCTAssertEqual(StatusPayloadSupplier.color(from: data), 4)
-    XCTAssertEqual(StatusPayloadSupplier.deviceKind(from: data), 1)
-    XCTAssertEqual(StatusPayloadSupplier.isOffline(from: data), true)
-    XCTAssertEqual(StatusPayloadSupplier.version(from: data), 2)
+    let offline = Data(androidOffline)
+    XCTAssertEqual(StatusPayloadSupplier.peerId(from: offline), 0x51C0_FFEE)
+    XCTAssertEqual(StatusPayloadSupplier.isOffline(from: offline), true)
   }
 
   func testAnIdWithTheTopBitSetDecodesToTheSameValueAsOnAndroid() {
@@ -82,15 +92,22 @@ class FrameOverridesTests: XCTestCase {
   private var clock = 0.0
   private var overrides: FrameOverrides!
 
-  private let online = FrameOverrides.Payload(status: 1, color: 2, deviceKind: 0, offline: false)
-  private let offline = FrameOverrides.Payload(status: 1, color: 2, deviceKind: 0, offline: true)
+  // Sent by an Android device, so its frames get the full lifetime.
+  private let online = FrameOverrides.Payload(status: 1, color: 2, deviceKind: 1, offline: false)
+  private let offline = FrameOverrides.Payload(status: 1, color: 2, deviceKind: 1, offline: true)
   private let onlineNewStatus = FrameOverrides.Payload(
-    status: 3, color: 2, deviceKind: 0, offline: false)
+    status: 3, color: 2, deviceKind: 1, offline: false)
+
+  private let iphoneOnline = FrameOverrides.Payload(
+    status: 1, color: 2, deviceKind: 0, offline: false)
+  private let iphoneOffline = FrameOverrides.Payload(
+    status: 1, color: 2, deviceKind: 0, offline: true)
 
   override func setUp() {
     super.setUp()
     clock = 0
-    overrides = FrameOverrides(ttlSeconds: 30, now: { [unowned self] in self.clock })
+    overrides = FrameOverrides(
+      ttlSeconds: 30, iphoneGoodbyeTtlSeconds: 5, now: { [unowned self] in self.clock })
   }
 
   func testWithoutAFrameEveryPayloadIsTakenAtFaceValue() {
@@ -148,6 +165,32 @@ class FrameOverridesTests: XCTestCase {
     // Expiry removed the entry rather than just hiding it.
     clock = 0
     XCTAssertEqual(overrides.resolve(peerId: 7, source: .cached, payload: online), online)
+  }
+
+  func testAGoodbyeFromAnIphoneExpiresAfterItsShorterLifetime() {
+    _ = overrides.resolve(peerId: 7, source: .frame, payload: iphoneOffline)
+
+    clock = 5
+    XCTAssertNil(overrides.resolve(peerId: 7, source: .cached, payload: iphoneOnline))
+
+    // A restart the hello never announced shows up again.
+    clock = 5.001
+    XCTAssertEqual(
+      overrides.resolve(peerId: 7, source: .cached, payload: iphoneOnline), iphoneOnline)
+  }
+
+  func testAHelloFromAnIphoneKeepsTheFullLifetime() {
+    _ = overrides.resolve(peerId: 7, source: .frame, payload: iphoneOffline)
+    clock = 1
+    _ = overrides.resolve(peerId: 7, source: .frame, payload: iphoneOnline)
+
+    clock = 31
+    XCTAssertEqual(
+      overrides.resolve(peerId: 7, source: .cached, payload: iphoneOffline), iphoneOnline)
+
+    clock = 31.001
+    XCTAssertEqual(
+      overrides.resolve(peerId: 7, source: .cached, payload: iphoneOffline), iphoneOffline)
   }
 
   func testANewerFrameReplacesTheOlderOneAndRestartsItsLifetime() {

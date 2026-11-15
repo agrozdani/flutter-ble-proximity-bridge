@@ -8,51 +8,56 @@ import org.junit.Assert.assertNull
 import org.junit.Test
 
 /**
- * Pins the 16-byte wire format. The byte arrays here are the same ones the
- * iOS tests (ios/RunnerTests/RunnerTests.swift) use, so the two codecs are
- * checked against one set of golden bytes.
+ * Pins the 16-byte wire format. RunnerTests.swift on iOS holds the same four
+ * byte arrays: each platform's encoder must produce its own pair exactly,
+ * and its decoder is run on the other platform's pair, so the two codecs are
+ * checked against each other.
  */
 class StatusPayloadSupplierTest {
 
     private fun bytes(vararg values: Int) = ByteArray(values.size) { values[it].toByte() }
 
+    // Peer id 0x51C0FFEE (three of its bytes are >= 0x80, so a decoder that
+    // sign-extends bytes fails), status 2, color 5, protocol version 2.
+    private val androidOnline = bytes(
+        0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, // peer id, little-endian
+        2, // status
+        5, // color
+        1, // device kind: Android
+        0, // flags
+        2, 0, 0, 0, // protocol version
+    )
+    private val androidOffline =
+        bytes(0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 1, 1, 2, 0, 0, 0)
+    private val iosOnline =
+        bytes(0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 0, 0, 2, 0, 0, 0)
+    private val iosOffline =
+        bytes(0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 0, 1, 2, 0, 0, 0)
+
     @Test
     fun `encodes the documented layout`() {
-        val supplier = StatusPayloadSupplier(0x1A2B3C4DL)
+        val supplier = StatusPayloadSupplier(0x51C0FFEEL)
         supplier.update(2, 5)
 
-        assertArrayEquals(
-            bytes(
-                0x4D, 0x3C, 0x2B, 0x1A, 0, 0, 0, 0, // peer id, little-endian
-                2, // status
-                5, // color
-                1, // device kind: Android
-                0, // flags
-                2, 0, 0, 0, // protocol version
-            ),
-            supplier.payload(PayloadTimestamp(), null).value,
-        )
+        assertArrayEquals(androidOnline, supplier.payload(PayloadTimestamp(), null).value)
 
         supplier.setOffline(true)
-        assertEquals(1, supplier.currentFrame().value[11].toInt())
+        assertArrayEquals(androidOffline, supplier.currentFrame().value)
     }
 
     @Test
-    fun `decodes a payload written by iOS`() {
-        val data = Data(
-            bytes(
-                0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0,
-                3, 4, 0, 1,
-                2, 0, 0, 0,
-            ),
-        )
+    fun `decodes the bytes the iOS encoder produces`() {
+        val online = Data(iosOnline)
+        assertEquals(0x51C0FFEEL, StatusPayloadSupplier.peerIdFrom(online))
+        assertEquals(2, StatusPayloadSupplier.statusFrom(online))
+        assertEquals(5, StatusPayloadSupplier.colorFrom(online))
+        assertEquals(0, StatusPayloadSupplier.deviceKindFrom(online))
+        assertEquals(false, StatusPayloadSupplier.isOfflineFrom(online))
+        assertEquals(2L, StatusPayloadSupplier.versionFrom(online))
 
-        assertEquals(0x51C0FFEEL, StatusPayloadSupplier.peerIdFrom(data))
-        assertEquals(3, StatusPayloadSupplier.statusFrom(data))
-        assertEquals(4, StatusPayloadSupplier.colorFrom(data))
-        assertEquals(0, StatusPayloadSupplier.deviceKindFrom(data))
-        assertEquals(true, StatusPayloadSupplier.isOfflineFrom(data))
-        assertEquals(2L, StatusPayloadSupplier.versionFrom(data))
+        val offline = Data(iosOffline)
+        assertEquals(0x51C0FFEEL, StatusPayloadSupplier.peerIdFrom(offline))
+        assertEquals(true, StatusPayloadSupplier.isOfflineFrom(offline))
     }
 
     @Test
