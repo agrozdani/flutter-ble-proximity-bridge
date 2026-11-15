@@ -127,14 +127,19 @@ Herald 2.2.0's source and CoreBluetooth's API surface:
    reading together with the payload it last read from that peer. A stopped
    iPhone cannot shed the peers connected to it: `CBPeripheralManager` has no
    API to disconnect an inbound central, and Herald's transmitter `stop()`
-   only stops advertising — the GATT service stays published and keeps
-   answering payload reads. Herald's receiver-side cleanup (stop scanning,
-   disconnect peripherals) is guarded by `central.isScanning` and skipped
-   entirely when scanning was not active at that moment — Bluetooth not yet
-   on, a stop before the first scan, a second stop. Because the enabled flag
-   is cleared first, scanning never resumes, so retrying stop cannot help.
-   Result: a peer connected to a "stopped" iPhone keeps receiving fresh RSSI
-   readings for it, paired with its last-read status, indefinitely.
+   only stops advertising and its keep-alive notifications — the GATT service
+   stays published and keeps answering payload reads. Herald's receiver-side
+   cleanup (stop scanning, disconnect peripherals) is guarded by
+   `central.isScanning` and skipped entirely when scanning was not active at
+   that moment — Bluetooth not yet on, a stop before the first scan, a second
+   stop. Because the enabled flag is cleared first, scanning never resumes,
+   so retrying stop cannot help.
+   Result: a peer connected to a "stopped" iPhone keeps re-reading its
+   payload over the surviving link (every `payloadDataUpdateTimeInterval`,
+   15 s here), gets an answer each time, and reports each read as a sighting
+   — so the stopped iPhone never goes stale. (RSSI readings on that link do
+   stop: Herald's iOS receiver takes them when the peer's transmitter sends a
+   keep-alive notification, and a stopped transmitter sends none.)
 2. **Rebuilding the stack races its own teardown.** Herald creates its
    CoreBluetooth managers with fixed state-restoration identifiers, and its
    stop is partial (above). Creating a second `SensorArray` while the first
@@ -162,6 +167,21 @@ API), then quiesces the host once the frames are out. Receivers translate
 the flag into a `{type: "gone"}` event and remove the peer instantly. On
 restart, an online hello reverses it.
 
+**PATTERN: a frame outvotes the cached payload.** A frame is pushed exactly
+because the receiver's copy of the payload is out of date — but Herald does
+not update that copy from a frame. It keeps handing over every RSSI reading
+together with the payload it last *read*, until its next re-read. Taken at
+face value, that stale copy overrules the frame on the very next reading: a
+peer that just said goodbye comes back with its old online payload (it is
+still advertising for a moment while it winds down), and a peer that just
+said hello is removed again by the offline payload cached while it was
+stopped. The pipeline therefore tracks where each payload came from
+(`FrameOverrides`): after a frame from a peer, payloads Herald only *holds*
+for that peer — the one attached to an RSSI reading, or a relayed copy — are
+replaced by what the frame said. A fresh read of the peer's payload ends the
+override, since that is newer than the frame; so does a timeout of two
+refresh intervals, in case that read never happens.
+
 Which peers a frame reaches depends on Herald's platform implementations:
 
 - An **iOS sender** writes to the peers it is connected to as a central —
@@ -171,9 +191,15 @@ Which peers a frame reaches depends on Herald's platform implementations:
   a background thread.
 - Only **iOS receivers** deliver the frame: Herald 2.2.0 for Android decodes
   immediate-send writes but never passes them to the delegate. Android
-  receivers rely on the nets below — which suffices, because Android Herald
-  does not hold connections open: once a stopped peer stops advertising,
-  its sightings simply stop.
+  receivers rely on the nets below. Android Herald does not hold connections
+  open and takes its RSSI from scan results, so a stopped Android peer —
+  which stops advertising and closes its GATT server — simply stops being
+  sighted and goes stale. A stopped iPhone can keep turning up in an Android
+  scan: Herald's Android scan filter also matches any Apple manufacturer
+  advertisement, and a known address is reported with the payload last read
+  from it. (Whether a stopped iPhone keeps advertising from the same address
+  is up to iOS and was not verified here.) In that case the offline flag in
+  the next payload re-read is what removes it.
 
 Three safety nets, in order of speed:
 
@@ -238,9 +264,14 @@ knowing before building on the bridge:
   to other iOS peers, for up to 5 minutes after last seeing them. A relay
   that never re-read the stopped iPhone's offline payload keeps relaying its
   last *online* one, so an iOS receiver can see the peer reappear after its
-  goodbye. Such sightings also carry the *relay's* RSSI, so their distance
-  is not the relayed peer's. A sequence number in the payload would let
-  receivers discard stale relays.
+  goodbye. (Herald reports a relayed payload it does not already hold as a
+  fresh read, so the frame-over-cache rule above cannot tell it apart.) Such
+  sightings also carry the *relay's* RSSI, so their distance is not the
+  relayed peer's. A sequence number in the payload would let receivers
+  discard stale relays. The same path can hand a device its *own* older
+  payload — the relay only skips a copy that is byte-identical to the
+  peer's current one — which is why the pipeline drops any payload carrying
+  the device's own id.
 - **Android keeps the CPU awake while the process lives.** Every Herald
   `SensorArray` on Android creates a timer that acquires a partial wake
   lock and releases it only in a finalizer. The timer's thread never ends

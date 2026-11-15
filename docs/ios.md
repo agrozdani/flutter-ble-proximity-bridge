@@ -9,6 +9,7 @@ Files: `ios/Runner/`
 | `StatusPayloadSupplier.swift` | 16-byte payload encode/decode |
 | `DistanceEstimator.swift` | Per-peer window → median → Kalman → bucket |
 | `KalmanFilter1D.swift` | Small 1-D Kalman-style smoothing filter |
+| `FrameOverrides.swift` | Lets a goodbye/hello frame outvote a cached payload |
 | `MockPeerSource.swift` | Synthetic sightings for the simulator |
 
 ## Channel registration (scene-based template)
@@ -77,7 +78,10 @@ Dart, which is why the Dart permission helper is Android-only.
 Herald delivers `SensorDelegate` callbacks on its own dispatch queues.
 The controller:
 
-1. decodes and estimates on the callback queue,
+1. decodes and estimates on the callback queue — touching only state that
+   is safe there (`sourceMode` and the local peer id sit behind a lock; the
+   estimator and the frame overrides lock internally; `payloadSupplier` is
+   main-thread-only and is not read from Herald's queues),
 2. hops to `DispatchQueue.main` — Flutter requires sink invocations on the
    platform thread,
 3. on the main thread, reads the sink under `NSLock` right before calling

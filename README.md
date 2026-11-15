@@ -36,6 +36,7 @@ Flutter interface, paired with an implementation that can be adapted directly.
 | Median → Kalman → bucket distance pipeline | Raw RSSI is far too noisy to display directly | [architecture.md](docs/architecture.md) |
 | Single long-lived BLE host | BLE stacks neither stop cleanly on demand nor survive rebuild races | [architecture.md](docs/architecture.md#stopping-is-a-protocol-problem) |
 | Protocol-level goodbye/hello | A stopped peripheral can't disconnect its centrals — peers would see a ghost | [architecture.md](docs/architecture.md#stopping-is-a-protocol-problem) |
+| Frame-over-cache precedence | The BLE library keeps reporting the payload it last *read*, which would overrule a goodbye/hello that just arrived | [architecture.md](docs/architecture.md#stopping-is-a-protocol-problem) |
 | Foreground service for background BLE | Android kills background scanning without one | [android.md](docs/android.md) |
 | Bluetooth background modes | iOS suspends a backgrounded app's BLE work without them | [ios.md](docs/ios.md) |
 | Transport-agnostic mock source | The full bridge runs on simulators with zero Bluetooth | [architecture.md](docs/architecture.md) |
@@ -47,12 +48,13 @@ problem — and the one this project is largely built around — is stopping
 cleanly.
 
 When a device stops, it should disappear from every other device's list. It
-does not. Herald holds GATT connections between iPhones open for continuous
-RSSI, and reports every reading together with the payload it **last read**
-from that peer. A `CBPeripheralManager` (iOS) has no API to disconnect a
-central already connected to it, and a stopped Herald stack keeps answering
-reads over the surviving link. Peers therefore continue to see a "stopped"
-iPhone, with its last status — a ghost peer that lingers indefinitely.
+does not. Herald holds GATT connections between iPhones open, and a
+`CBPeripheralManager` (iOS) has no API to disconnect a central already
+connected to it. A stopped Herald stack keeps answering payload reads over
+the surviving link, and the peer on the other end re-reads the payload on a
+timer and reports every successful read. Peers therefore continue to see a
+"stopped" iPhone, with its last status — a ghost peer that lingers
+indefinitely.
 
 ```mermaid
 sequenceDiagram
@@ -63,8 +65,9 @@ sequenceDiagram
     A->>A: user taps Stop
     Note over A: the radio cannot disconnect B,<br/>so the link survives
     loop with no goodbye
-        B->>B: measure A's RSSI over the live link
-        Note over B: reports A with its last-read payload —<br/>A lingers as a ghost peer
+        B->>A: re-read payload over the live link
+        A-->>B: unchanged payload (the stopped stack still answers)
+        Note over B: every read counts as a sighting —<br/>A lingers as a ghost peer
     end
     rect rgb(223, 240, 216)
         A->>B: goodbye frame (offline flag)<br/>via Herald immediateSendAll
@@ -401,6 +404,14 @@ most approachable to the most involved.
 flutter test
 ```
 
+```bash
+cd android && ./gradlew :app:testDebugUnitTest
+```
+
+The iOS unit tests live in the `RunnerTests` target (`ios/RunnerTests/`); run
+them from Xcode, or with `xcodebuild test -workspace ios/Runner.xcworkspace
+-scheme Runner` and a simulator `-destination`.
+
 The Dart tests cover the parts of the bridge that can be verified without a
 radio:
 
@@ -413,10 +424,22 @@ radio:
   (subscribe → start → await ready → push status), peer ingestion, the immediate
   goodbye path, clean stop/restart, a rejected start, an event stream that
   errors mid-handshake or once running, a stop that cancels a start
-  mid-handshake, and a status change made while the handshake is finishing.
+  mid-handshake, a start issued while a stop is still tearing down, and a
+  status change made while the handshake is finishing.
 - [`bridge_event_test.dart`](test/bridge_event_test.dart) covers event decoding
   and its edge cases — including integer-typed measurements being widened to
   `double` (defensive: the codec itself preserves native `Double`s).
+
+The native tests cover the two pieces of native logic that need no radio
+either, with the same cases on both platforms:
+
+- `StatusPayloadSupplierTest.kt` / `StatusPayloadSupplierTests` (Swift) pin the
+  16-byte wire format against one shared set of golden bytes, so the Kotlin
+  and Swift codecs are checked against each other rather than only against
+  themselves.
+- `FrameOverridesTest.kt` / `FrameOverridesTests` (Swift) cover the rule
+  that lets a goodbye/hello frame outvote a cached payload until the next
+  fresh read.
 
 ## Adapting it for your own app
 

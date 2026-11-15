@@ -121,6 +121,11 @@ carries the offline flag (see the wire payload below and
 Immediate-send frames only ever reach iOS receivers; Herald 2.2.0 for
 Android does not deliver them.
 
+After a goodbye frame, the native side stops reporting that peer from
+payloads the BLE library merely has cached, until the peer's payload is read
+afresh — otherwise the cached online copy would bring the peer straight
+back. The same applies in reverse after a hello.
+
 ### `{type: "peer", ...}`
 
 One sighting of a nearby peer.
@@ -140,6 +145,10 @@ and the payload list of a relay (Herald's payload sharing). On iOS, Herald
 also reports a relayed payload as a *measured* sighting, but with the relay's
 RSSI — see [Known limitations](architecture.md#known-limitations).
 
+A device never reports itself: a payload carrying the id this device was
+started with is dropped natively (a relay can hand a device its own payload
+back).
+
 ## Wire payload (BLE)
 
 What actually travels between devices, encoded by `StatusPayloadSupplier`
@@ -157,6 +166,10 @@ identically in Kotlin and Swift. 16 bytes, little-endian:
 Decoding rules, enforced on both platforms:
 
 - A payload shorter than 16 bytes is dropped, never partially parsed.
+- The peer id is read as a 64-bit pattern: an id with the top bit set
+  reaches Dart as the same negative `int` from both platforms. This app
+  never broadcasts one (`start` rejects a negative `peerId`), but any device
+  on the service UUID could.
 - A malformed payload must never crash the listener — peers may run other
   builds of this app, or other apps entirely if they collide on the UUID.
 - The format is append-only: new fields go after the current 16 bytes and bump
