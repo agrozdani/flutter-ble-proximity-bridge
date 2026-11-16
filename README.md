@@ -504,6 +504,7 @@ about once a minute near other Apple devices — are listed in
 - [Android implementation](docs/android.md) — foreground service, permissions, the pending-sink race, Herald's scan cycle
 - [iOS implementation](docs/ios.md) — background modes, state restoration, the Herald patches
 - [Logging and debugging](docs/logging.md) — the log format, where lines go, collecting and merging logs from several devices, a debugging playbook
+- [Driving the app on real devices](docs/device-testing.md) — scripted taps and screenshots on Android over adb, XCUITest on iPhone/iPad, keeping signing out of the repo
 
 ## License & credits
 
