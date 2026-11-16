@@ -6,8 +6,8 @@ import XCTest
 @testable import Runner
 
 /// Pins the 16-byte wire format. StatusPayloadSupplierTest.kt on Android
-/// holds the same four byte arrays: each platform's encoder must produce its
-/// own pair exactly, and its decoder is run on the other platform's pair, so
+/// holds the same byte arrays: each platform's encoder must produce its own
+/// pairs exactly, and its decoder is run on the other platform's pairs, so
 /// the two codecs are checked against each other.
 class StatusPayloadSupplierTests: XCTestCase {
 
@@ -30,6 +30,21 @@ class StatusPayloadSupplierTests: XCTestCase {
   ]
   private let androidOffline: [UInt8] = [
     0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 1, 0x07, 3, 0, 0, 0,
+  ]
+
+  // The same payload at revision 127 (flags 0xFE, top bit set) and, once the
+  // counter has wrapped, at revision 0 offline (flags 0x01).
+  private let iosRevision127: [UInt8] = [
+    0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 0, 0xFE, 3, 0, 0, 0,
+  ]
+  private let iosRevision0Offline: [UInt8] = [
+    0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 0, 0x01, 3, 0, 0, 0,
+  ]
+  private let androidRevision127: [UInt8] = [
+    0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 1, 0xFE, 3, 0, 0, 0,
+  ]
+  private let androidRevision0Offline: [UInt8] = [
+    0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 1, 0x01, 3, 0, 0, 0,
   ]
 
   func testEncodesTheDocumentedLayout() throws {
@@ -58,6 +73,38 @@ class StatusPayloadSupplierTests: XCTestCase {
     XCTAssertEqual(StatusPayloadSupplier.peerId(from: offline), 0x51C0_FFEE)
     XCTAssertEqual(StatusPayloadSupplier.isOffline(from: offline), true)
     XCTAssertEqual(StatusPayloadSupplier.revision(from: offline), 3)
+  }
+
+  func testARevisionOf64OrMoreSetsTheTopBitOfTheFlags() throws {
+    let revisions = RevisionCounter()
+    for _ in 0..<125 { _ = revisions.next() }
+    let supplier = StatusPayloadSupplier(peerId: 0x51C0_FFEE, revisions: revisions)  // 126
+    supplier.update(status: 2, color: 5)  // 127
+
+    XCTAssertEqual([UInt8](try XCTUnwrap(supplier.currentFrame())), iosRevision127)
+    supplier.setOffline(true)  // wraps to 0
+    XCTAssertEqual([UInt8](try XCTUnwrap(supplier.currentFrame())), iosRevision0Offline)
+
+    let top = Data(androidRevision127)
+    XCTAssertEqual(StatusPayloadSupplier.revision(from: top), 127)
+    XCTAssertEqual(StatusPayloadSupplier.isOffline(from: top), false)
+    let wrapped = Data(androidRevision0Offline)
+    XCTAssertEqual(StatusPayloadSupplier.revision(from: wrapped), 0)
+    XCTAssertEqual(StatusPayloadSupplier.isOffline(from: wrapped), true)
+  }
+
+  func testAStatusChangeThatDoesNotReachTheWireTakesNoRevision() throws {
+    let supplier = StatusPayloadSupplier(peerId: 1, revisions: RevisionCounter())
+    func revision() throws -> Int? {
+      StatusPayloadSupplier.revision(from: try XCTUnwrap(supplier.currentFrame()))
+    }
+
+    supplier.update(status: 300, color: 0)
+    XCTAssertEqual(try revision(), 2)
+    XCTAssertEqual(StatusPayloadSupplier.status(from: try XCTUnwrap(supplier.currentFrame())), 255)
+    // Also 255 on the wire.
+    supplier.update(status: 301, color: 0)
+    XCTAssertEqual(try revision(), 2)
   }
 
   func testAVersion2PayloadHasNoRevision() {
@@ -377,11 +424,12 @@ class FrameOverridesTests: XCTestCase {
     XCTAssertEqual(overrides.resolve(peerId: 7, source: .frame, payload: offline), offline)
   }
 
-  func testTheNewestRevisionIsRememberedWhileItKeepsBeingConfirmed() {
+  func testTheNewestRevisionIsRememberedWhileReadsKeepConfirmingIt() {
     _ = overrides.resolve(peerId: 7, source: .read, payload: rev(10))
 
+    // A re-read of the same payload.
     clock = 50
-    _ = overrides.resolve(peerId: 7, source: .cached, payload: rev(10))
+    _ = overrides.resolve(peerId: 7, source: .read, payload: rev(10))
 
     clock = 110
     XCTAssertNil(overrides.resolve(peerId: 7, source: .frame, payload: rev(9, offline: true)))
@@ -391,6 +439,56 @@ class FrameOverridesTests: XCTestCase {
     XCTAssertEqual(
       overrides.resolve(peerId: 7, source: .frame, payload: rev(9, offline: true)),
       rev(9, offline: true))
+  }
+
+  func testCachedCopiesDoNotKeepARevisionRemembered() {
+    // The last payload a sender process read out before it was killed.
+    _ = overrides.resolve(peerId: 7, source: .read, payload: rev(40))
+    // Herald keeps attaching that copy to readings.
+    clock = 30
+    XCTAssertEqual(overrides.resolve(peerId: 7, source: .cached, payload: rev(40)), rev(40))
+
+    // A new process under the same peer id, its counter started again: it
+    // looks older, so its reads are dropped...
+    clock = 40
+    XCTAssertNil(overrides.resolve(peerId: 7, source: .read, payload: rev(2, offline: true)))
+
+    // ...only until 60 s after the last read of revision 40. The readings in
+    // between did not extend that.
+    clock = 60.001
+    XCTAssertEqual(
+      overrides.resolve(peerId: 7, source: .read, payload: rev(2, offline: true)),
+      rev(2, offline: true))
+  }
+
+  func testACachedCopyOfAGoodbyeDoesNotStopItFromRunningOut() {
+    _ = overrides.resolve(peerId: 7, source: .read, payload: iphoneRev(5))
+    clock = 1
+    _ = overrides.resolve(peerId: 7, source: .frame, payload: iphoneRev(6, offline: true))
+
+    // A relay hands over a copy of the same goodbye.
+    clock = 2
+    XCTAssertNil(overrides.resolve(peerId: 7, source: .cached, payload: iphoneRev(6, offline: true)))
+
+    // The goodbye has run out: readings with Herald's older copy are
+    // believed, as without the relay (a restart whose hello was lost).
+    clock = 6.001
+    XCTAssertEqual(
+      overrides.resolve(peerId: 7, source: .cached, payload: iphoneRev(5)), iphoneRev(5))
+  }
+
+  func testThePeriodicSweepDropsExpiredEntriesOfPeersNoLongerSeen() {
+    _ = overrides.resolve(peerId: 7, source: .frame, payload: offline)
+    clock = 30
+    _ = overrides.resolve(peerId: 8, source: .read, payload: rev(1))
+    XCTAssertEqual(overrides.trackedPeerCount(), 2)
+
+    // The first lookup more than 60 s after the last sweep runs one. Peer 7's
+    // frame (30 s) and revision (60 s) have both run out; peer 8's revision
+    // is 30 s old. The cached payload itself is not remembered.
+    clock = 60.001
+    _ = overrides.resolve(peerId: 9, source: .cached, payload: online)
+    XCTAssertEqual(overrides.trackedPeerCount(), 1)
   }
 
   func testARevisionNotConfirmedWithinTheMemoryIsForgottenBetweenSweeps() {
@@ -426,6 +524,11 @@ class FrameOverridesTests: XCTestCase {
 /// The classification tests use payloads without a revision (protocol
 /// version 2): with one, a misclassified read could be dropped as stale and
 /// hide the mistake.
+///
+/// The pipeline is held as a `SensorDelegate`, the way Herald holds it.
+/// Herald's protocol extension gives every callback an empty default, so a
+/// method whose signature drifted from Herald's would still compile but never
+/// be called; through the protocol these tests would then fail.
 class PayloadPipelineTests: XCTestCase {
 
   private static let localId = 99
@@ -433,16 +536,18 @@ class PayloadPipelineTests: XCTestCase {
   private var active = true
   private var events: [String] = []
   private var malformed: [Int] = []
-  private var pipeline: PayloadPipeline!
+  private var overrides: FrameOverrides!
+  private var pipeline: SensorDelegate!
 
   override func setUp() {
     super.setUp()
     active = true
     events = []
     malformed = []
+    overrides = FrameOverrides(
+      ttlSeconds: 30, iphoneGoodbyeTtlSeconds: 5, revisionMemorySeconds: 60, now: { 0 })
     pipeline = PayloadPipeline(
-      frameOverrides: FrameOverrides(
-        ttlSeconds: 30, iphoneGoodbyeTtlSeconds: 5, revisionMemorySeconds: 60, now: { 0 }),
+      frameOverrides: overrides,
       isActive: { [unowned self] in self.active },
       localPeerId: { PayloadPipelineTests.localId },
       onSighting: { [unowned self] peerId, status, _, _, rssi in
@@ -519,6 +624,8 @@ class PayloadPipelineTests: XCTestCase {
     pipeline.sensor(.BLE, didRead: payload(Self.localId), fromTarget: target)
 
     XCTAssertEqual(events, [])
+    // Dropped before FrameOverrides saw it, so it left nothing behind.
+    XCTAssertEqual(overrides.trackedPeerCount(), 0)
   }
 
   func testWhileInactiveNothingIsReportedButFramesAreStillRecorded() {
@@ -533,6 +640,19 @@ class PayloadPipelineTests: XCTestCase {
     pipeline.sensor(.BLE, didMeasure: reading(-60), fromTarget: target, withPayload: payload(7))
     pipeline.sensor(.BLE, didMeasure: reading(-61), fromTarget: target, withPayload: payload(8))
     XCTAssertEqual(events, ["peer 8 status 1 rssi -61.0"])
+  }
+
+  func testWhileInactiveAReadIsStillRecorded() {
+    goodbye(7)
+    active = false
+    // Read afresh while we are stopped: it ends the goodbye.
+    pipeline.sensor(.BLE, didRead: payload(7), fromTarget: target)
+    XCTAssertEqual(events, ["gone 7"])
+
+    // So after the next start, Herald's copy of that read is reported.
+    active = true
+    pipeline.sensor(.BLE, didMeasure: reading(-60), fromTarget: target, withPayload: payload(7))
+    XCTAssertEqual(events, ["gone 7", "peer 7 status 1 rssi -60.0"])
   }
 
   func testAMalformedPayloadIsDroppedAndLogged() {

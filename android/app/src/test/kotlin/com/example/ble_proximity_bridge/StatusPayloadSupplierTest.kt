@@ -9,9 +9,9 @@ import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
- * Pins the 16-byte wire format. RunnerTests.swift on iOS holds the same four
- * byte arrays: each platform's encoder must produce its own pair exactly,
- * and its decoder is run on the other platform's pair, so the two codecs are
+ * Pins the 16-byte wire format. RunnerTests.swift on iOS holds the same byte
+ * arrays: each platform's encoder must produce its own pairs exactly, and
+ * its decoder is run on the other platform's pairs, so the two codecs are
  * checked against each other.
  */
 class StatusPayloadSupplierTest {
@@ -35,6 +35,17 @@ class StatusPayloadSupplierTest {
         bytes(0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 0, 0x04, 3, 0, 0, 0)
     private val iosOffline =
         bytes(0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 0, 0x07, 3, 0, 0, 0)
+
+    // The same payload at revision 127 (flags 0xFE, top bit set) and, once
+    // the counter has wrapped, at revision 0 offline (flags 0x01).
+    private val androidRevision127 =
+        bytes(0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 1, 0xFE, 3, 0, 0, 0)
+    private val androidRevision0Offline =
+        bytes(0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 1, 0x01, 3, 0, 0, 0)
+    private val iosRevision127 =
+        bytes(0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 0, 0xFE, 3, 0, 0, 0)
+    private val iosRevision0Offline =
+        bytes(0xEE, 0xFF, 0xC0, 0x51, 0, 0, 0, 0, 2, 5, 0, 0x01, 3, 0, 0, 0)
 
     @Test
     fun `encodes the documented layout`() {
@@ -64,6 +75,38 @@ class StatusPayloadSupplierTest {
         assertEquals(0x51C0FFEEL, StatusPayloadSupplier.peerIdFrom(offline))
         assertEquals(true, StatusPayloadSupplier.isOfflineFrom(offline))
         assertEquals(3, StatusPayloadSupplier.revisionFrom(offline))
+    }
+
+    @Test
+    fun `a revision of 64 or more sets the top bit of the flags`() {
+        val revisions = RevisionCounter()
+        repeat(125) { revisions.next() }
+        val supplier = StatusPayloadSupplier(0x51C0FFEEL, revisions) // revision 126
+        supplier.update(2, 5) // 127
+
+        assertArrayEquals(androidRevision127, supplier.currentFrame().value)
+        supplier.setOffline(true) // wraps to 0
+        assertArrayEquals(androidRevision0Offline, supplier.currentFrame().value)
+
+        val top = Data(iosRevision127)
+        assertEquals(127, StatusPayloadSupplier.revisionFrom(top))
+        assertEquals(false, StatusPayloadSupplier.isOfflineFrom(top))
+        val wrapped = Data(iosRevision0Offline)
+        assertEquals(0, StatusPayloadSupplier.revisionFrom(wrapped))
+        assertEquals(true, StatusPayloadSupplier.isOfflineFrom(wrapped))
+    }
+
+    @Test
+    fun `a status change that does not reach the wire takes no revision`() {
+        val supplier = StatusPayloadSupplier(1L, RevisionCounter())
+        fun revision() = StatusPayloadSupplier.revisionFrom(supplier.currentFrame())
+
+        supplier.update(300, 0)
+        assertEquals(2, revision())
+        assertEquals(255, StatusPayloadSupplier.statusFrom(supplier.currentFrame()))
+        // Also 255 on the wire.
+        supplier.update(301, 0)
+        assertEquals(2, revision())
     }
 
     @Test

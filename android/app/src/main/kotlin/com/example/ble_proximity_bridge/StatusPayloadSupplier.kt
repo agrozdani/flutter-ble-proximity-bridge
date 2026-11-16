@@ -151,10 +151,14 @@ class StatusPayloadSupplier(
     }
 
     fun update(status: Int, color: Int) {
+        // Clamped as Herald's UInt8 writes them, so a change that never
+        // reaches the wire (300 to 301) takes no revision. Same as iOS.
+        val newStatus = status.coerceIn(0, 255)
+        val newColor = color.coerceIn(0, 255)
         synchronized(lock) {
-            if (this.status == status && this.color == color) return
-            this.status = status
-            this.color = color
+            if (this.status == newStatus && this.color == newColor) return
+            this.status = newStatus
+            this.color = newColor
             revision = revisions.next()
         }
     }
@@ -200,6 +204,13 @@ class StatusPayloadSupplier(
  * by every supplier: a host rebuilt for a new session keeps the same peer id,
  * so its supplier must carry on above the old one's revisions. Revisions are
  * 7 bits and wrap; receivers compare them with serial-number arithmetic.
+ *
+ * The counter lives in memory and starts again in every process. That is
+ * safe here because Dart picks a new random peer id at every launch. An app
+ * that keeps its peer id across launches must persist the counter's last
+ * value with it and continue from there: otherwise receivers that still
+ * remember the previous launch take the new one's payloads, goodbye
+ * included, for older ones (see FrameOverrides).
  */
 class RevisionCounter {
     private val last = AtomicInteger(0)

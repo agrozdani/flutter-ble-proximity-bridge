@@ -31,22 +31,31 @@ import android.os.SystemClock
  * works through its peers, so its goodbye keeps the full [ttlMillis].
  *
  * Payloads from protocol version 3 on also carry a revision, which the
- * sender bumps on every change. The newest revision seen from each peer is
- * remembered for [revisionMemoryMillis] after it was last confirmed, and a
- * frame or read older than it is dropped: a frame delivered late, a read
- * that a frame overtook, or a stale copy relayed by another peer. A cached
- * payload older than it is described by the newest payload instead when
- * that one is online. When the newest is an offline frame whose lifetime has
- * run out, the cached payload is taken at face value: readings carrying the
- * old copy then most likely mean the peer restarted and its hello was lost.
- * Without revisions (older peers), only the frame rule above applies.
+ * sender bumps on every change. The newest revision a peer sent us, in a
+ * frame or a read, is remembered for [revisionMemoryMillis] after it last
+ * arrived that way. Cached copies are never remembered: Herald's own repeats
+ * the payload it last read, already reported as a read, and a relay's can be
+ * older still, so remembering them would keep an old revision alive for as
+ * long as readings repeat it. While a revision is remembered, a frame or read
+ * older than it is dropped: a frame delivered late, a read that a frame
+ * overtook, or a stale copy relayed by another peer. A cached payload older
+ * than it is described by the newest payload instead when that one is
+ * online. When the newest is an offline frame whose lifetime has run out,
+ * the cached payload is taken at face value: readings carrying the old copy
+ * then most likely mean the peer restarted and its hello was lost. Without
+ * revisions (older peers), only the frame rule above applies.
+ *
+ * Revisions only order the payloads of one sender process. Each process
+ * starts its counter again (see [RevisionCounter]), so a peer id reused by a
+ * new process looks older than what is remembered of the old one, and its
+ * payloads are dropped or overruled until that memory lapses.
  */
 class FrameOverrides(
     /** How long a frame outvotes cached payloads if no fresh read ends it. */
     private val ttlMillis: Long,
     /** The same for a goodbye sent by an iPhone. */
     private val iphoneGoodbyeTtlMillis: Long,
-    /** How long a peer's newest revision is remembered once last confirmed. */
+    /** How long a peer's newest revision is remembered after its last frame or read. */
     private val revisionMemoryMillis: Long,
     private val now: () -> Long = SystemClock::elapsedRealtime,
 ) {
@@ -98,7 +107,10 @@ class FrameOverrides(
         val known = unexpiredNewest(peerId)
         val stale = known != null &&
             order(payload.revision, known.payload.revision) == Order.OLDER
-        if (!stale) newest[peerId] = Newest(payload, now(), source == Source.FRAME)
+        // Only what the peer sent us itself is remembered (see above).
+        if (!stale && source != Source.CACHED) {
+            newest[peerId] = Newest(payload, now(), source == Source.FRAME)
+        }
 
         when (source) {
             Source.FRAME -> {
@@ -118,7 +130,10 @@ class FrameOverrides(
             Source.CACHED -> {
                 val frame = unexpiredFrame(peerId)
                 if (frame != null) {
-                    if (!stale && order(payload.revision, frame.payload.revision) == Order.NEWER) {
+                    // A later frame replaces this one and a later read ends
+                    // it, so the frame is the newest payload remembered for
+                    // the peer, and a stale payload is never newer than it.
+                    if (order(payload.revision, frame.payload.revision) == Order.NEWER) {
                         // Herald holds something newer than the frame.
                         frames.remove(peerId)
                         return payload
@@ -145,6 +160,10 @@ class FrameOverrides(
         frames.clear()
         newest.clear()
     }
+
+    /** How many peers have an entry, expired or not. For tests. */
+    @Synchronized
+    internal fun trackedPeerCount(): Int = (frames.keys + newest.keys).size
 
     private fun lifetimeOf(frame: Payload): Long =
         if (frame.offline && frame.deviceKind == StatusPayloadSupplier.DEVICE_KIND_IOS) {

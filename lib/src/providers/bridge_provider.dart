@@ -43,8 +43,11 @@ final bridgeProvider = NotifierProvider<BridgeController, BridgeState>(
 /// Drives the bridge: start/stop, the event subscription, and the ready
 /// handshake.
 class BridgeController extends Notifier<BridgeState> {
-  /// Random id per launch. Persist one if you need peers to recognize you
-  /// across restarts; the bridge itself doesn't care.
+  /// Random id per launch, which the bridge relies on: the native payload
+  /// revision counter starts again in every process, so peers would take a
+  /// new launch under an old id for an older one and ignore its payloads,
+  /// goodbye included, for up to about a minute. To keep an id across
+  /// restarts, persist the native `RevisionCounter` with it (see the README).
   final int _localPeerId = Random().nextInt(1 << 31);
 
   StreamSubscription<BridgeEvent>? _subscription;

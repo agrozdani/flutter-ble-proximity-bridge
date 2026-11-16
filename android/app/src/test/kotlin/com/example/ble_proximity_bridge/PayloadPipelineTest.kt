@@ -25,13 +25,15 @@ class PayloadPipelineTest {
     private val events = mutableListOf<String>()
     private val malformed = mutableListOf<Int>()
 
+    private val overrides = FrameOverrides(
+        ttlMillis = 30_000L,
+        iphoneGoodbyeTtlMillis = 5_000L,
+        revisionMemoryMillis = 60_000L,
+        now = { 0L },
+    )
+
     private val pipeline = PayloadPipeline(
-        FrameOverrides(
-            ttlMillis = 30_000L,
-            iphoneGoodbyeTtlMillis = 5_000L,
-            revisionMemoryMillis = 60_000L,
-            now = { 0L },
-        ),
+        overrides,
         isActive = { active },
         localPeerId = { LOCAL_ID },
         listener = object : PayloadPipeline.Listener {
@@ -122,6 +124,8 @@ class PayloadPipelineTest {
         pipeline.sensor(ble, payload(LOCAL_ID), target)
 
         assertEquals(emptyList<String>(), events)
+        // Dropped before FrameOverrides saw it, so it left nothing behind.
+        assertEquals(0, overrides.trackedPeerCount())
     }
 
     @Test
@@ -137,6 +141,20 @@ class PayloadPipelineTest {
         pipeline.sensor(ble, reading(-60.0), target, payload(7))
         pipeline.sensor(ble, reading(-61.0), target, payload(8))
         assertEquals(listOf("peer 8 status 1 rssi -61.0"), events)
+    }
+
+    @Test
+    fun `while inactive a read is still recorded`() {
+        goodbye(7)
+        active = false
+        // Read afresh while we are stopped: it ends the goodbye.
+        pipeline.sensor(ble, payload(7), target)
+        assertEquals(listOf("gone 7"), events)
+
+        // So after the next start, Herald's copy of that read is reported.
+        active = true
+        pipeline.sensor(ble, reading(-60.0), target, payload(7))
+        assertEquals(listOf("gone 7", "peer 7 status 1 rssi -60.0"), events)
     }
 
     @Test

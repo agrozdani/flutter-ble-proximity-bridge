@@ -72,10 +72,15 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         private const val IPHONE_GOODBYE_OVERRIDE_MILLIS = 5_000L
 
         /**
-         * How long the newest payload revision seen from a peer is
-         * remembered after it was last confirmed. Long enough to outlast
-         * stale relays between our re-reads, short enough that a 7-bit
-         * revision cannot wrap around unnoticed in between.
+         * How long the newest payload revision a peer sent us is remembered
+         * after it last arrived in a frame or a read; cached copies do not
+         * count (see FrameOverrides). Long enough to outlast stale relays
+         * between our re-reads. A 7-bit revision can only be misread as
+         * older if the peer changed its payload more than 64 times between
+         * two such arrivals, which are at most this far apart while it is
+         * remembered. Here the payload only changes on user actions (a
+         * status or color change; a stop/start is two changes); an app that
+         * changes it faster has to stay below that rate.
          */
         private const val REVISION_MEMORY_MILLIS = 60_000L
 

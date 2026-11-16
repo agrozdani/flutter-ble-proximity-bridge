@@ -208,6 +208,13 @@ final class StatusPayloadSupplier: PayloadDataSupplier {
 /// id, so its supplier must carry on above the old one's revisions.
 /// Revisions are 7 bits and wrap; receivers compare them with serial-number
 /// arithmetic.
+///
+/// The counter lives in memory and starts again in every process. That is
+/// safe here because Dart picks a new random peer id at every launch. An app
+/// that keeps its peer id across launches must persist the counter's last
+/// value with it and continue from there: otherwise receivers that still
+/// remember the previous launch take the new one's payloads, goodbye
+/// included, for older ones (see FrameOverrides).
 final class RevisionCounter {
   static let shared = RevisionCounter()
 

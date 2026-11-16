@@ -28,15 +28,24 @@ import Foundation
 /// works through its peers, so its goodbye keeps the full `ttlSeconds`.
 ///
 /// Payloads from protocol version 3 on also carry a revision, which the
-/// sender bumps on every change. The newest revision seen from each peer is
-/// remembered for `revisionMemorySeconds` after it was last confirmed, and a
-/// frame or read older than it is dropped: a frame delivered late, a read
-/// that a frame overtook, or a stale copy relayed by another peer. A cached
-/// payload older than it is described by the newest payload instead when
-/// that one is online. When the newest is an offline frame whose lifetime has
-/// run out, the cached payload is taken at face value: readings carrying the
-/// old copy then most likely mean the peer restarted and its hello was lost.
-/// Without revisions (older peers), only the frame rule above applies.
+/// sender bumps on every change. The newest revision a peer sent us, in a
+/// frame or a read, is remembered for `revisionMemorySeconds` after it last
+/// arrived that way. Cached copies are never remembered: Herald's own repeats
+/// the payload it last read, already reported as a read, and a relay's can be
+/// older still, so remembering them would keep an old revision alive for as
+/// long as readings repeat it. While a revision is remembered, a frame or
+/// read older than it is dropped: a frame delivered late, a read that a frame
+/// overtook, or a stale copy relayed by another peer. A cached payload older
+/// than it is described by the newest payload instead when that one is
+/// online. When the newest is an offline frame whose lifetime has run out,
+/// the cached payload is taken at face value: readings carrying the old copy
+/// then most likely mean the peer restarted and its hello was lost. Without
+/// revisions (older peers), only the frame rule above applies.
+///
+/// Revisions only order the payloads of one sender process. Each process
+/// starts its counter again (see `RevisionCounter`), so a peer id reused by a
+/// new process looks older than what is remembered of the old one, and its
+/// payloads are dropped or overruled until that memory lapses.
 final class FrameOverrides {
 
   /// Where Herald got the payload it is handing over.
@@ -88,8 +97,8 @@ final class FrameOverrides {
   /// `ttlSeconds` is how long a frame outvotes cached payloads if no fresh
   /// read ends it; `iphoneGoodbyeTtlSeconds` the same for a goodbye sent by
   /// an iPhone; `revisionMemorySeconds` how long a peer's newest revision is
-  /// remembered once last confirmed. `now` is a monotonic clock in seconds;
-  /// tests inject their own.
+  /// remembered after its last frame or read. `now` is a monotonic clock in
+  /// seconds; tests inject their own.
   init(
     ttlSeconds: Double,
     iphoneGoodbyeTtlSeconds: Double,
@@ -112,7 +121,8 @@ final class FrameOverrides {
     sweepIfDue()
     let known = unexpiredNewest(peerId: peerId)
     let stale = known.map { order(payload.revision, $0.payload.revision) == .older } ?? false
-    if !stale {
+    // Only what the peer sent us itself is remembered (see above).
+    if !stale, source != .cached {
       newest[peerId] = Newest(payload: payload, confirmedAt: now(), fromFrame: source == .frame)
     }
 
@@ -131,7 +141,10 @@ final class FrameOverrides {
       return payload
     case .cached:
       if let frame = unexpiredFrame(peerId: peerId) {
-        if !stale, order(payload.revision, frame.payload.revision) == .newer {
+        // A later frame replaces this one and a later read ends it, so the
+        // frame is the newest payload remembered for the peer, and a stale
+        // payload is never newer than it.
+        if order(payload.revision, frame.payload.revision) == .newer {
           // Herald holds something newer than the frame.
           frames.removeValue(forKey: peerId)
           return payload
@@ -153,6 +166,13 @@ final class FrameOverrides {
     defer { lock.unlock() }
     frames.removeAll()
     newest.removeAll()
+  }
+
+  /// How many peers have an entry, expired or not. For tests.
+  func trackedPeerCount() -> Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return Set(frames.keys).union(newest.keys).count
   }
 
   private func lifetime(of frame: Payload) -> Double {
