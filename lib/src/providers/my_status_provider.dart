@@ -1,5 +1,6 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../logging/log.dart';
 import '../models/my_status.dart';
 import '../models/peer.dart';
 import 'bridge_provider.dart';
@@ -23,9 +24,15 @@ class MyStatusController extends Notifier<MyStatus> {
 
   Future<void> _update(MyStatus next) async {
     state = next;
+    final running = ref.read(bridgeProvider).isRunning;
+    Log.i(
+      'status',
+      'broadcast ${next.status.name} color=${next.colorIndex}'
+          '${running ? '' : ' (bridge not running; start() will push it)'}',
+    );
     // Nothing to push while the bridge is down; start() sends the latest
     // value right after the handshake.
-    if (ref.read(bridgeProvider).isRunning) {
+    if (running) {
       await ref
           .read(methodChannelProvider)
           .updateStatus(status: next.status.code, color: next.colorIndex);

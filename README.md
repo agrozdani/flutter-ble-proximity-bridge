@@ -348,17 +348,25 @@ discover each other automatically — select different statuses and colors,
 observe them propagate, then move the devices apart and watch the distance
 bucket change.
 
+**Logs.** Dart, Kotlin and Swift all log in one line format, shown by
+`flutter run`, written to a log file on each device and viewable in the app
+(the receipt icon). After a test, `dart run tool/devlogs.dart pull` copies
+the logs from every connected device and merges them into one timeline. See
+[docs/logging.md](docs/logging.md), which also has a debugging playbook.
+
 ## Repository layout
 
 ```
 lib/src/bridge/      Channel names (the contract) + typed channel wrappers
+lib/src/logging/     Log line format, Dart logger, wiring to the native logger
 lib/src/models/      Peer, sighting events, broadcast status
 lib/src/providers/   Riverpod: bridge lifecycle, peer aggregation, status
-lib/src/ui/          Example UI: status picker, peer list, permissions
+lib/src/ui/          Example UI: status picker, peer list, permissions, log viewer
 android/.../         MainActivity, ProximityService, codec, estimator, mock   ┐ mirror
 ios/Runner/          AppDelegate, ProximityController, codec, estimator, mock  ┘ each other
-docs/                Architecture, channel contract, platform deep-dives
-test/                Event decoding + channel contract + bridge tests
+docs/                Architecture, channel contract, platform deep-dives, logging
+test/                Event decoding + channel contract + bridge + log format tests
+tool/devlogs.dart    Pulls, follows and merges the logs of connected devices
 ```
 
 The Android and iOS folders are deliberate mirrors: `ProximityService.kt` ↔
@@ -434,6 +442,10 @@ radio:
 - [`bridge_event_test.dart`](test/bridge_event_test.dart) covers event decoding
   and its edge cases — including integer-typed measurements being widened to
   `double` (defensive: the codec itself preserves native `Double`s).
+- [`log_test.dart`](test/log_test.dart) pins the log line format shared with
+  the native loggers and `tool/devlogs.dart`: formatting, finding a line
+  behind the prefixes logcat and `flutter run` add, peer ids in hex, and
+  level filtering.
 
 The native tests cover the native logic that needs no radio either, with the
 same cases on both platforms:
@@ -450,7 +462,8 @@ same cases on both platforms:
   wins: a goodbye/hello frame over a cached payload until the next fresh read
   or its timeout (shorter for a goodbye from an iPhone), and the newest
   revision over stale frames, reads and relayed copies. They also pin that only
-  frames and reads keep a revision remembered, and the periodic sweep.
+  frames and reads keep a revision remembered, the periodic sweep, and the
+  verdict each decision reports for the log.
 - `PayloadPipelineTest.kt` / `PayloadPipelineTests` (Swift) drive the pipeline
   through Herald's own delegate callbacks (on iOS through the `SensorDelegate`
   protocol, as Herald calls them): how each callback is classified, the
@@ -489,6 +502,7 @@ payloads briefly resurrecting a stopped iPhone — are listed in
 - [Channel contract](docs/channel-contract.md) — every method, event, and wire byte
 - [Android implementation](docs/android.md) — foreground service, permissions, the pending-sink race
 - [iOS implementation](docs/ios.md) — background modes, state restoration, the Herald patches
+- [Logging and debugging](docs/logging.md) — the log format, where lines go, collecting and merging logs from several devices, a debugging playbook
 
 ## License & credits
 

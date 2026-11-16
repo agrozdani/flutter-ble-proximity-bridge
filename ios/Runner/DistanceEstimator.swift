@@ -9,6 +9,23 @@ import Foundation
 /// more precise would just be noise.
 final class DistanceEstimator {
 
+  /// One estimate and what it was computed from, for the log.
+  struct Estimate {
+    let distance: Double
+    let median: Double
+    let smoothed: Double
+    let samples: Int
+    /// True when the sender's iPhone cutoffs were used.
+    let iosCutoffs: Bool
+  }
+
+  /// A peer's model as of its last sample, for the periodic stats line.
+  struct Snapshot {
+    let peerId: Int
+    let last: Estimate
+    let lastSampleAge: Double
+  }
+
   private let lock = NSLock()
   private var models: [Int: PeerModel] = [:]
 
@@ -23,6 +40,11 @@ final class DistanceEstimator {
   /// sample on), or nil for a NaN sample. One locked operation so concurrent
   /// BLE callbacks can't interleave.
   func addSample(peerId: Int, rssi: Double, senderDeviceKind: Int) -> Double? {
+    addSampleDetailed(peerId: peerId, rssi: rssi, senderDeviceKind: senderDeviceKind)?.distance
+  }
+
+  /// `addSample`, with the median and smoothed RSSI behind the estimate.
+  func addSampleDetailed(peerId: Int, rssi: Double, senderDeviceKind: Int) -> Estimate? {
     guard !rssi.isNaN else { return nil }
     lock.lock()
     defer { lock.unlock() }
@@ -43,6 +65,17 @@ final class DistanceEstimator {
     models.removeValue(forKey: peerId)
   }
 
+  func snapshot() -> [Snapshot] {
+    lock.lock()
+    defer { lock.unlock() }
+    let now = MonotonicClock.seconds()
+    return models.compactMap { peerId, model in
+      model.last.map {
+        Snapshot(peerId: peerId, last: $0, lastSampleAge: now - model.lastSampleAt)
+      }
+    }
+  }
+
   private final class PeerModel {
     private static let maxSamples = 20
     private static let windowSeconds = 30.0
@@ -55,6 +88,9 @@ final class DistanceEstimator {
     private static let bucketsMeters = [0.5, 1.5, 3.5, 8.0]
 
     private let cutoffs: [Double]
+    private let iosCutoffs: Bool
+    private(set) var last: Estimate?
+    private(set) var lastSampleAt: Double = 0
 
     // (monotonic seconds, rssi) pairs. MonotonicClock ignores wall-clock
     // changes and keeps counting while the device sleeps, so neither can
@@ -67,13 +103,14 @@ final class DistanceEstimator {
     )
 
     init(senderDeviceKind: Int) {
+      iosCutoffs = senderDeviceKind == 0
       cutoffs =
-        senderDeviceKind == 0
+        iosCutoffs
         ? PeerModel.rssiCutoffsIOSSender
         : PeerModel.rssiCutoffsAndroidSender
     }
 
-    func addAndEstimate(_ rssi: Double) -> Double? {
+    func addAndEstimate(_ rssi: Double) -> Estimate? {
       let now = MonotonicClock.seconds()
       window.append((time: now, rssi: rssi))
       if window.count > PeerModel.maxSamples {
@@ -85,10 +122,17 @@ final class DistanceEstimator {
       let median = medianOf(window.map { $0.rssi })
       let smoothed = kalman.update(median)
 
+      var distance = PeerModel.bucketsMeters[PeerModel.bucketsMeters.count - 1]
       for (index, cutoff) in cutoffs.enumerated() where smoothed > cutoff {
-        return PeerModel.bucketsMeters[index]
+        distance = PeerModel.bucketsMeters[index]
+        break
       }
-      return PeerModel.bucketsMeters.last
+      let estimate = Estimate(
+        distance: distance, median: median, smoothed: smoothed, samples: window.count,
+        iosCutoffs: iosCutoffs)
+      last = estimate
+      lastSampleAt = now
+      return estimate
     }
 
     private func medianOf(_ values: [Double]) -> Double {

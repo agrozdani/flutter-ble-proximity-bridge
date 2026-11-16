@@ -12,6 +12,7 @@ Files: `android/app/src/main/kotlin/com/example/ble_proximity_bridge/`
 | `KalmanFilter1D.kt` | Small 1-D Kalman-style smoothing filter |
 | `FrameOverrides.kt` | Decides which payload to believe: frames over cached copies, newest revision over stale ones |
 | `MockPeerSource.kt` | Synthetic sightings for emulators |
+| `BridgeLog.kt` | Logging: logcat, the on-device log file, lines for Dart ([logging.md](logging.md)) |
 
 ## Why a foreground service
 

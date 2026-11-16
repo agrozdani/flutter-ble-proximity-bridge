@@ -5,6 +5,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter/widgets.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../logging/log.dart';
 import '../models/bridge_event.dart';
 import 'channel_providers.dart';
 import 'my_status_provider.dart';
@@ -67,19 +68,38 @@ class BridgeController extends Notifier<BridgeState> {
   /// for it so a stop that is still tearing down reaches native first.
   Future<void> _lastTeardown = Future<void>.value();
 
+  /// How often the bridge's state is summarized in the log (`dart.stats`).
+  static const Duration _statsInterval = Duration(seconds: 15);
+
+  /// Events received from native: since the last stats line, and in total.
+  final Map<String, int> _eventCounts = {};
+  final Map<String, int> _eventTotals = {};
+
   @override
   BridgeState build() {
     _lifecycle = AppLifecycleListener(onResume: _onAppResumed);
+    final statsTimer = Timer.periodic(_statsInterval, (_) => _logStats());
     ref.onDispose(() {
       _subscription?.cancel();
       _lifecycle?.dispose();
+      statsTimer.cancel();
     });
+    listenSelf(_logTransition);
+    // Device logs are merged on this line: it says which id is this device.
+    Log.i(
+      'bridge',
+      'identity self=${peerHex(_localPeerId)} session=$kDemoSessionId',
+    );
     return const BridgeState();
   }
 
   Future<void> start({bool mock = false}) async {
-    if (state.phase == BridgePhase.starting || state.isRunning) return;
+    if (state.phase == BridgePhase.starting || state.isRunning) {
+      Log.i('bridge', 'start(mock=$mock) ignored: already ${state.phase.name}');
+      return;
+    }
     final generation = ++_generation;
+    Log.i('bridge', 'start #$generation mock=$mock');
     _startRequested = true;
     state = BridgeState(
       phase: BridgePhase.starting,
@@ -103,12 +123,17 @@ class BridgeController extends Notifier<BridgeState> {
     } on Object {
       // Whoever started that teardown gets its error.
     }
-    if (generation != _generation) return;
+    if (generation != _generation) {
+      Log.i('bridge', 'start #$generation superseded during the last teardown');
+      return;
+    }
     _subscription = ref
         .read(eventChannelProvider)
         .events()
         .listen(_onEvent, onError: _onStreamError);
+    Log.d('bridge', 'start #$generation subscribed to native events');
 
+    final watch = Stopwatch()..start();
     try {
       final accepted = await ref
           .read(methodChannelProvider)
@@ -119,8 +144,13 @@ class BridgeController extends Notifier<BridgeState> {
           message: 'Native side rejected the start request',
         );
       }
+      Log.d('bridge', 'start #$generation accepted; waiting for ready (10s)');
 
       await ready.future.timeout(const Duration(seconds: 10));
+      Log.i(
+        'bridge',
+        'start #$generation ready after ${watch.elapsedMilliseconds}ms',
+      );
 
       // Native starts with a blank payload; push our current status now.
       final pushed = ref.read(myStatusProvider);
@@ -129,9 +159,15 @@ class BridgeController extends Notifier<BridgeState> {
           .updateStatus(status: pushed.status.code, color: pushed.colorIndex);
 
       // A stop() ran while we waited, so idle was requested; stay there.
-      if (generation != _generation) return;
+      if (generation != _generation) {
+        Log.i('bridge', 'start #$generation superseded during the handshake');
+        return;
+      }
       // The stream reported an error after ready; don't mask it.
-      if (state.phase == BridgePhase.error) return;
+      if (state.phase == BridgePhase.error) {
+        Log.w('bridge', 'start #$generation: stream failed after ready');
+        return;
+      }
       state = BridgeState(
         phase: BridgePhase.running,
         mockMode: mock,
@@ -143,6 +179,7 @@ class BridgeController extends Notifier<BridgeState> {
       final latest = ref.read(myStatusProvider);
       if (latest.status != pushed.status ||
           latest.colorIndex != pushed.colorIndex) {
+        Log.i('bridge', 'status changed during the handshake; pushing again');
         await ref
             .read(methodChannelProvider)
             .updateStatus(status: latest.status.code, color: latest.colorIndex);
@@ -150,7 +187,16 @@ class BridgeController extends Notifier<BridgeState> {
     } on Exception catch (e) {
       // Superseded by a stop() (and maybe a fresh start()): this failure is
       // moot, and tearing down now would kill whatever came after.
-      if (generation != _generation) return;
+      if (generation != _generation) {
+        Log.i('bridge', 'start #$generation abandoned (superseded): $e');
+        return;
+      }
+      Log.w(
+        'bridge',
+        'start #$generation failed after ${watch.elapsedMilliseconds}ms'
+            '${e is TimeoutException ? ' (no ready event)' : ''}',
+        e,
+      );
       await _teardown();
       if (generation != _generation) return;
       state = BridgeState(
@@ -164,35 +210,56 @@ class BridgeController extends Notifier<BridgeState> {
 
   Future<void> stop() async {
     final generation = ++_generation;
+    Log.i('bridge', 'stop #$generation (was ${state.phase.name})');
     _startRequested = false;
     await _teardown();
     // A start() issued while teardown was in flight owns the bridge now.
-    if (generation != _generation) return;
+    if (generation != _generation) {
+      Log.i('bridge', 'stop #$generation: a newer start took over');
+      return;
+    }
     ref.read(peersProvider.notifier).clear();
     state = const BridgeState();
   }
 
   void _onEvent(BridgeEvent event) {
+    final kind = switch (event) {
+      BridgeReady() => 'ready',
+      PeerSighting() => 'peer',
+      PeerGone() => 'gone',
+      UnknownBridgeEvent() => 'unknown',
+    };
+    _eventCounts.update(kind, (count) => count + 1, ifAbsent: () => 1);
+    _eventTotals.update(kind, (count) => count + 1, ifAbsent: () => 1);
     switch (event) {
       case BridgeReady():
-        if (!(_ready?.isCompleted ?? true)) _ready!.complete();
+        final waiting = !(_ready?.isCompleted ?? true);
+        Log.i('events', 'ready${waiting ? '' : ' (no start waiting for it)'}');
+        if (waiting) _ready!.complete();
       case PeerSighting():
+        // Too frequent to log one by one; PeersController logs what changes
+        // and native logs every sighting it emits (native.emit).
         ref.read(peersProvider.notifier).applySighting(event);
       case PeerGone():
+        Log.i('events', 'gone ${peerHex(event.id)}');
         ref.read(peersProvider.notifier).removeNow(event.id);
       case UnknownBridgeEvent():
-        break; // Unknown event type, skip it.
+        Log.w('events', 'unknown event type "${event.type}" ignored');
     }
   }
 
   void _onStreamError(Object error) {
+    _eventCounts.update('error', (count) => count + 1, ifAbsent: () => 1);
+    _eventTotals.update('error', (count) => count + 1, ifAbsent: () => 1);
     // If the handshake is still pending, fail it now instead of letting
     // the ready wait run out its timeout; start()'s catch sets the state.
     final ready = _ready;
     if (ready != null && !ready.isCompleted) {
+      Log.w('events', 'stream error during the handshake', error);
       ready.completeError(error is Exception ? error : Exception('$error'));
       return;
     }
+    Log.w('events', 'stream error; bridge → error', error);
     state = BridgeState(
       phase: BridgePhase.error,
       mockMode: state.mockMode,
@@ -210,6 +277,7 @@ class BridgeController extends Notifier<BridgeState> {
   /// Bluetooth comes on.
   void _onAppResumed() {
     if (_startRequested && state.phase == BridgePhase.error) {
+      Log.i('bridge', 'app resumed after a failure: retrying start');
       start(mock: state.mockMode);
     }
   }
@@ -230,11 +298,57 @@ class BridgeController extends Notifier<BridgeState> {
       ready.completeError(const _StartCancelled());
     }
     await subscription?.cancel();
+    Log.d('bridge', 'teardown: events cancelled; stopping native');
     try {
       await ref.read(methodChannelProvider).stop();
-    } on PlatformException {
+    } on PlatformException catch (error) {
       // Already stopped is fine. Teardown has to work from any state.
+      Log.d('bridge', 'teardown: native stop failed (ignored): $error');
     }
+  }
+
+  void _logTransition(BridgeState? previous, BridgeState next) {
+    if (previous == null) return;
+    if (previous.phase == next.phase && previous.error == next.error) return;
+    final message =
+        'phase ${previous.phase.name} → ${next.phase.name}'
+        '${next.phase == BridgePhase.idle ? '' : ' mock=${next.mockMode}'}'
+        '${next.error == null ? '' : ' error="${next.error}"'}';
+    if (next.phase == BridgePhase.error) {
+      Log.w('bridge', message);
+    } else {
+      Log.i('bridge', message);
+    }
+  }
+
+  /// One summary line every [_statsInterval] while there is anything to
+  /// report. Compare its event counts with native's `native.stats` line to
+  /// see whether events get lost on the way.
+  void _logStats() {
+    final peers = ref.read(peersProvider);
+    if (state.phase == BridgePhase.idle &&
+        peers.isEmpty &&
+        _eventCounts.isEmpty) {
+      return;
+    }
+    String counts(String kind) =>
+        '$kind=+${_eventCounts[kind] ?? 0}/${_eventTotals[kind] ?? 0}';
+    final now = DateTime.now();
+    final listed = peers.values.map((peer) {
+      final rssi = peer.rssi == null ? '' : ' ${peer.rssi!.round()}dBm';
+      final age = now.difference(peer.lastSeen).inMilliseconds / 1000;
+      return '${peerHex(peer.id)} ${peer.distanceLabel}$rssi '
+          '${peer.status.name}/${peer.colorIndex} ${peer.deviceKind.name} '
+          'seen ${age.toStringAsFixed(1)}s ago';
+    });
+    Log.i(
+      'stats',
+      'phase=${state.phase.name} mock=${state.mockMode} gen=$_generation '
+          'events ${counts('peer')} ${counts('gone')} ${counts('ready')} '
+          '${counts('error')} | peers=${peers.length}'
+          '${listed.isEmpty ? '' : ': ${listed.join('; ')}'}',
+    );
+    _eventCounts.clear();
   }
 }
 

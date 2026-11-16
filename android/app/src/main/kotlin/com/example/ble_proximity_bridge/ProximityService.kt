@@ -5,6 +5,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.Service
+import android.bluetooth.BluetoothManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
@@ -13,13 +14,13 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
-import android.util.Log
+import android.os.SystemClock
 import io.flutter.plugin.common.EventChannel
 import io.heraldprox.herald.sensor.SensorArray
 import io.heraldprox.herald.sensor.datatype.PayloadData
 import io.heraldprox.herald.sensor.ble.BLESensorConfiguration
-import io.heraldprox.herald.sensor.data.SensorLoggerLevel
 import io.heraldprox.herald.sensor.datatype.TimeInterval
+import java.util.Locale
 import java.util.UUID
 import java.util.concurrent.Executors
 import java.util.concurrent.atomic.AtomicLong
@@ -36,7 +37,6 @@ import java.util.concurrent.atomic.AtomicReference
 class ProximityService : Service(), EventChannel.StreamHandler {
 
     companion object {
-        private const val TAG = "ProximityService"
         private const val NOTIFICATION_CHANNEL_ID = "proximity_bridge_service"
         private const val NOTIFICATION_ID = 71
 
@@ -84,6 +84,9 @@ class ProximityService : Service(), EventChannel.StreamHandler {
          */
         private const val REVISION_MEMORY_MILLIS = 60_000L
 
+        /** How often the bridge's state is summarized in the log (native.stats). */
+        private const val STATS_INTERVAL_MILLIS = 15_000L
+
         const val EXTRA_SESSION_ID = "sessionId"
         const val EXTRA_PEER_ID = "peerId"
         const val EXTRA_MOCK = "mock"
@@ -107,6 +110,23 @@ class ProximityService : Service(), EventChannel.StreamHandler {
 
         fun parkPendingSink(sink: EventChannel.EventSink?) {
             pendingSinkRef.set(sink)
+        }
+
+        /** For the log: which runtime permissions real BLE has. */
+        fun describePermissions(context: Context): String {
+            val names = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+                listOf(
+                    Manifest.permission.BLUETOOTH_SCAN,
+                    Manifest.permission.BLUETOOTH_ADVERTISE,
+                    Manifest.permission.BLUETOOTH_CONNECT,
+                )
+            } else {
+                listOf(Manifest.permission.ACCESS_FINE_LOCATION)
+            }
+            return names.joinToString(" ") { name ->
+                val granted = context.checkSelfPermission(name) == PackageManager.PERMISSION_GRANTED
+                "${name.substringAfterLast('.')}=${if (granted) "granted" else "DENIED"}"
+            }
         }
 
         /** The runtime permissions real BLE needs (none before Android 12). */
@@ -165,13 +185,27 @@ class ProximityService : Service(), EventChannel.StreamHandler {
     // and blocks until each exchange finishes, which can take seconds. Frames
     // go out on this thread so the main thread never waits on the radio. One
     // thread keeps goodbye/hello frames in the order they were sent.
-    private val frameSender = Executors.newSingleThreadExecutor()
+    private val frameSender = Executors.newSingleThreadExecutor { task ->
+        Thread(task, "frame-sender")
+    }
 
     // Herald calls us on worker threads. Flutter sink calls must happen on
     // the main thread and the sink can disappear at any time.
     private var eventSink: EventChannel.EventSink? = null
     private val sinkLock = Any()
     private val mainThread = Handler(Looper.getMainLooper())
+
+    // What went to Dart, for the stats line; main thread only. "nosink"
+    // counts events dropped because Dart was not listening.
+    private val emitted = LinkedHashMap<String, Int>()
+    private val emittedTotals = LinkedHashMap<String, Int>()
+    private var droppedWithoutSink = 0
+    private val statsTicker = object : Runnable {
+        override fun run() {
+            logStats()
+            mainThread.postDelayed(this, STATS_INTERVAL_MILLIS)
+        }
+    }
 
     /** True while a source (BLE or mock) is logically running. */
     val isRunning: Boolean
@@ -181,11 +215,14 @@ class ProximityService : Service(), EventChannel.StreamHandler {
 
     override fun onCreate() {
         super.onCreate()
+        BridgeLog.start(applicationContext)
         instanceRef.set(this)
+        BridgeLog.i("service", "created")
         pendingSinkRef.getAndSet(null)?.let {
-            Log.i(TAG, "Claiming event sink parked before service creation")
+            BridgeLog.i("sink", "claiming the event sink parked before the service existed")
             onListen(null, it)
         }
+        mainThread.postDelayed(statsTicker, STATS_INTERVAL_MILLIS)
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
@@ -194,6 +231,7 @@ class ProximityService : Service(), EventChannel.StreamHandler {
             // and no Flutter engine is attached, so there is nothing to resume.
             // The service idles until Dart starts it again, or until Android
             // stops it as an idle background service.
+            BridgeLog.w("service", "sticky restart without an intent (process was killed); idling")
             return START_STICKY
         }
 
@@ -201,6 +239,11 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         val peerId = intent.getLongExtra(EXTRA_PEER_ID, -1L)
         val mock = intent.getBooleanExtra(EXTRA_MOCK, false)
         val command = intent.getLongExtra(EXTRA_COMMAND, -1L)
+        BridgeLog.i(
+            "service",
+            "start command #$command (latest #${latestCommand.get()}) mock=$mock " +
+                "session=$sessionId self=${peerHex(peerId)} was=$sourceMode",
+        )
 
         // A real-BLE start arrives via startForegroundService(), and a service
         // started that way must call startForeground() before it stops or
@@ -213,7 +256,7 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         }
         if (superseded) {
             // Dart stopped (or restarted) before Android delivered this start.
-            Log.i(TAG, "Start was superseded before delivery; ignoring it")
+            BridgeLog.i("service", "start command #$command was superseded before delivery; ignoring it")
             stopForeground(STOP_FOREGROUND_REMOVE)
             return START_NOT_STICKY
         }
@@ -222,8 +265,11 @@ class ProximityService : Service(), EventChannel.StreamHandler {
             return START_NOT_STICKY
         }
         if (!mock && !hasBluetoothPermissions(this)) {
-            failStart("Bluetooth permissions are not granted")
+            failStart("Bluetooth permissions are not granted (${describePermissions(this)})")
             return START_NOT_STICKY
+        }
+        if (!mock) {
+            BridgeLog.i("ble", "permissions ${describePermissions(this)}; adapter ${adapterState()}")
         }
 
         mockSource?.stop()
@@ -258,7 +304,7 @@ class ProximityService : Service(), EventChannel.StreamHandler {
 
     /** Ends a start that cannot proceed and tells Dart, instead of leaving it to time out. */
     private fun failStart(reason: String) {
-        Log.e(TAG, "Start failed: $reason")
+        BridgeLog.e("service", "start failed: $reason")
         stopForeground(STOP_FOREGROUND_REMOVE)
         emitError("start_failed", reason)
         stopSelf()
@@ -268,7 +314,9 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         // Android can destroy the service on its own, e.g. a mock-mode (plain,
         // non-foreground) service about a minute after the app is backgrounded.
         // Tell Dart so it does not keep showing a bridge that is gone.
+        BridgeLog.w("service", "destroyed (mode was $sourceMode, host ${if (sensorArray != null) "up" else "none"})")
         if (isRunning) emitError("service_stopped", "Android stopped the proximity service")
+        mainThread.removeCallbacks(statsTicker)
 
         // Real teardown: the cached host dies with the service. Frames already
         // queued still go out; nothing new can be queued after this.
@@ -291,6 +339,7 @@ class ProximityService : Service(), EventChannel.StreamHandler {
 
     /** Called from MainActivity when Dart invokes stop. */
     fun stopProximity() {
+        BridgeLog.i("service", "stop (mode was $sourceMode)")
         mockSource?.stop()
         mockSource = null
         // Flip the mode first so late Herald callbacks are no longer
@@ -311,6 +360,7 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         val host = sensorArray
         val supplier = payloadSupplier
         if (host != null && supplier != null && bleHostSessionId == sessionId) {
+            BridgeLog.i("host", "resuming the existing Herald host (same session)")
             supplier.updatePeerId(peerId)
             supplier.setOffline(false)
             sourceMode = SourceMode.BLE
@@ -318,7 +368,7 @@ class ProximityService : Service(), EventChannel.StreamHandler {
             // Tell recently seen peers we are back so they do not keep our
             // cached offline payload until the next re-read.
             val hello = supplier.currentFrame()
-            frameSender.execute { sendFrame(host, hello) }
+            frameSender.execute { sendFrame(host, hello, "hello") }
             sendReady()
             return
         }
@@ -334,7 +384,7 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         // A new session id means a new service UUID, so the host has to be
         // rebuilt. The demo's fixed session id does not hit this path.
         if (host != null) {
-            Log.i(TAG, "Session id changed; rebuilding BLE host")
+            BridgeLog.i("host", "session id changed ($bleHostSessionId → $sessionId); rebuilding the Herald host")
             host.stop()
             sensorArray = null
             bleHostSessionId = null
@@ -352,8 +402,13 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         BLESensorConfiguration.standardHeraldServiceDetectionEnabled = false
         BLESensorConfiguration.standardHeraldServiceAdvertisingEnabled = false
         BLESensorConfiguration.legacyHeraldServiceDetectionEnabled = false
-        BLESensorConfiguration.logLevel = SensorLoggerLevel.off
+        BLESensorConfiguration.logLevel = BridgeLog.heraldLevel
 
+        BridgeLog.i(
+            "host",
+            "building a Herald host: service=$sessionId refresh=${PAYLOAD_REFRESH.value}s " +
+                "herald log=${BridgeLog.heraldLevel.name}",
+        )
         val newSupplier = StatusPayloadSupplier.forRebuiltHost(peerId, previousSupplier)
         // A new host starts with an empty Herald cache, so overrides of the
         // old one's cached payloads no longer apply.
@@ -366,9 +421,10 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         try {
             sourceMode = SourceMode.BLE
             newHost.start()
+            BridgeLog.i("host", "Herald host started; broadcasting ${newSupplier.describe()}")
             sendReady()
         } catch (e: Exception) {
-            Log.e(TAG, "Failed to start BLE sensor array", e)
+            BridgeLog.e("host", "Herald failed to start", e)
             sensorArray = null
             bleHostSessionId = null
             payloadSupplier = null
@@ -385,13 +441,19 @@ class ProximityService : Service(), EventChannel.StreamHandler {
             supplier.setOffline(true)
             supplier.currentFrame()
         }
+        BridgeLog.i("host", "quiescing: goodbye queued, host stops once it is out")
         frameSender.execute {
             // Returns only after Herald has finished with every peer.
-            if (goodbye != null) sendFrame(host, goodbye)
+            if (goodbye != null) sendFrame(host, goodbye, "goodbye")
             mainThread.post {
                 // A BLE start raced in while the goodbye went out, so leave
                 // the host up.
-                if (sourceMode != SourceMode.BLE) host.stop()
+                if (sourceMode != SourceMode.BLE) {
+                    host.stop()
+                    BridgeLog.i("host", "Herald host stopped after the goodbye")
+                } else {
+                    BridgeLog.i("host", "BLE restarted while the goodbye went out; host left running")
+                }
             }
         }
     }
@@ -402,11 +464,16 @@ class ProximityService : Service(), EventChannel.StreamHandler {
      * thrown, because an exception escaping this worker thread would crash
      * the app and, for a goodbye, skip the host stop that follows it.
      */
-    private fun sendFrame(host: SensorArray, frame: PayloadData) {
+    private fun sendFrame(host: SensorArray, frame: PayloadData, kind: String) {
+        val started = SystemClock.elapsedRealtime()
+        BridgeLog.i("frame", "sending $kind ${StatusPayloadSupplier.describe(frame)} to recent peers")
         try {
+            // Herald 2.2.0 returns true whatever happened and does not say
+            // how many peers it reached; the time it blocked is the hint.
             host.immediateSendAll(frame)
+            BridgeLog.i("frame", "$kind done in ${SystemClock.elapsedRealtime() - started} ms")
         } catch (e: Exception) {
-            Log.w(TAG, "Sending a goodbye/hello frame failed", e)
+            BridgeLog.w("frame", "$kind failed after ${SystemClock.elapsedRealtime() - started} ms", e)
         }
     }
 
@@ -415,6 +482,11 @@ class ProximityService : Service(), EventChannel.StreamHandler {
             handleSighting(peerId, status, color, deviceKind, rssi)
         }.also { it.start() }
         sourceMode = SourceMode.MOCK
+        BridgeLog.i(
+            "mock",
+            "mock source started (3 synthetic peers, 1 sighting each per second); " +
+                "broadcasting ${payloadSupplier?.describe() ?: "nothing"}",
+        )
         sendReady()
     }
 
@@ -431,7 +503,23 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         rssi: Double?,
     ) {
         if (sourceMode == SourceMode.IDLE) return
-        val distance = rssi?.let { distanceEstimator.addSample(peerId, it, deviceKind) }
+        val estimate = rssi?.let { distanceEstimator.addSampleDetailed(peerId, it, deviceKind) }
+        val distance = estimate?.distance
+        BridgeLog.d("emit") {
+            val measured = if (rssi == null) {
+                "no rssi"
+            } else if (estimate == null) {
+                "rssi=$rssi (no estimate)"
+            } else {
+                String.format(
+                    Locale.US,
+                    "rssi=%.0f median=%.1f smooth=%.1f n=%d %s → %.1fm",
+                    rssi, estimate.median, estimate.smoothed, estimate.samples,
+                    if (estimate.iosCutoffs) "iosCutoffs" else "androidCutoffs", estimate.distance,
+                )
+            }
+            "peer ${peerHex(peerId)} st=$status col=$color ${deviceKindName(deviceKind)} $measured"
+        }
 
         val event = hashMapOf<String, Any>(
             "type" to "peer",
@@ -449,39 +537,65 @@ class ProximityService : Service(), EventChannel.StreamHandler {
     private fun emitGone(peerId: Long) {
         // Drop the distance model now instead of waiting for Dart to do it.
         distanceEstimator.forget(peerId)
+        BridgeLog.i("emit", "gone ${peerHex(peerId)}")
         val event = hashMapOf<String, Any>("type" to "gone", "id" to peerId)
         mainThread.post { emit(event) }
     }
 
     private fun sendReady() {
+        BridgeLog.i("emit", "ready (mode $sourceMode)")
         mainThread.post { emit(hashMapOf<String, Any>("type" to "ready")) }
     }
 
-    private fun emit(event: Map<String, Any>) = withSink { it.success(event) }
+    private fun emit(event: Map<String, Any>) =
+        withSink(event["type"] as? String ?: "?") { it.success(event) }
 
     private fun emitError(code: String, message: String) {
-        mainThread.post { withSink { it.error(code, message, null) } }
+        BridgeLog.w("emit", "error $code: $message")
+        mainThread.post { withSink("error") { it.error(code, message, null) } }
     }
 
     /** Runs [send] against the current sink. Main thread only. */
-    private fun withSink(send: (EventChannel.EventSink) -> Unit) {
+    private fun withSink(kind: String, send: (EventChannel.EventSink) -> Unit) {
         synchronized(sinkLock) {
-            val sink = eventSink ?: return
+            val sink = eventSink
+            if (sink == null) {
+                if (droppedWithoutSink == 0) {
+                    BridgeLog.i("sink", "Dart is not listening; dropping events until it does (first: $kind)")
+                }
+                droppedWithoutSink++
+                count("nosink")
+                return
+            }
             try {
                 send(sink)
+                count(kind)
             } catch (e: Exception) {
                 // Engine teardown can invalidate the sink between the null
                 // check and the call, so drop it and stop trying.
-                Log.w(TAG, "Event sink rejected event; clearing", e)
+                BridgeLog.w("sink", "event sink rejected a $kind event; clearing it", e)
                 eventSink = null
             }
         }
     }
 
+    private fun count(kind: String) {
+        emitted[kind] = (emitted[kind] ?: 0) + 1
+        emittedTotals[kind] = (emittedTotals[kind] ?: 0) + 1
+    }
+
     // ----- EventChannel.StreamHandler ------------------------------------------
 
     override fun onListen(arguments: Any?, events: EventChannel.EventSink?) {
-        synchronized(sinkLock) { eventSink = events }
+        synchronized(sinkLock) {
+            eventSink = events
+            BridgeLog.i(
+                "sink",
+                "Dart subscribed to events (running=$isRunning" +
+                    (if (droppedWithoutSink > 0) ", $droppedWithoutSink dropped meanwhile)" else ")"),
+            )
+            droppedWithoutSink = 0
+        }
         // If the source was already running when Dart subscribed, the first
         // ready event went nowhere. Send it again.
         if (isRunning) sendReady()
@@ -491,6 +605,65 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         // Queued emits become no-ops once the sink is cleared. Do not wipe
         // pending callbacks because quiesce still needs to run.
         synchronized(sinkLock) { eventSink = null }
+        BridgeLog.i("sink", "Dart cancelled its event subscription")
+    }
+
+    // ----- Stats ---------------------------------------------------------------
+
+    /**
+     * One summary line every [STATS_INTERVAL_MILLIS] while a source or the
+     * host is up, plus one line per peer that has a distance model or a
+     * remembered payload. Main thread.
+     */
+    private fun logStats() {
+        if (!isRunning && sensorArray == null) return
+        val herald = payloadPipeline.takeStats()
+        // A stopped host that hears nothing has nothing to report.
+        if (!isRunning && herald == "none" && emitted.isEmpty()) return
+        val events = if (emitted.isEmpty()) {
+            "none"
+        } else {
+            emitted.entries.joinToString(" ") { "${it.key}=+${it.value}/${emittedTotals[it.key]}" }
+        }
+        emitted.clear()
+        val sinkState = synchronized(sinkLock) { if (eventSink != null) "on" else "OFF" }
+        // Herald reports the Bluetooth state only when it changes, so ask
+        // the adapter too.
+        val bluetooth = "${payloadPipeline.bluetoothState?.name ?: "?"}/adapter ${adapterState()}"
+        BridgeLog.i(
+            "stats",
+            "mode=$sourceMode host=${if (sensorArray != null) "up" else "none"} " +
+                "bt=$bluetooth sink=$sinkState " +
+                "${payloadSupplier?.describe() ?: "no payload"} | herald: $herald " +
+                "| to dart: $events",
+        )
+        val models = distanceEstimator.snapshot().associateBy { it.peerId }
+        val remembered = frameOverrides.snapshot()
+        for (peerId in (models.keys + remembered.keys).sorted()) {
+            val model = models[peerId]
+            val distance = model?.let {
+                String.format(
+                    Locale.US, "smooth=%.1f n=%d → %.1fm last sample %.1fs ago",
+                    it.last.smoothed, it.last.samples, it.last.distance, it.lastSampleAgeMillis / 1000.0,
+                )
+            } ?: "no distance model"
+            BridgeLog.i(
+                "stats",
+                "  peer ${peerHex(peerId)} $distance | ${remembered[peerId] ?: "nothing remembered"}",
+            )
+        }
+    }
+
+    /** For the log: whether the Bluetooth adapter is on. */
+    private fun adapterState(): String = try {
+        val adapter = getSystemService(BluetoothManager::class.java)?.adapter
+        when {
+            adapter == null -> "missing"
+            adapter.isEnabled -> "on"
+            else -> "OFF"
+        }
+    } catch (e: SecurityException) {
+        "unknown (no permission)"
     }
 
     // ----- Foreground promotion -------------------------------------------------
@@ -513,7 +686,7 @@ class ProximityService : Service(), EventChannel.StreamHandler {
             // On Android 14+ the connectedDevice type is refused unless a
             // Bluetooth permission is granted. MainActivity checks first, so
             // this is a backstop rather than the normal path.
-            Log.e(TAG, "Foreground promotion failed", e)
+            BridgeLog.e("service", "foreground promotion failed", e)
             false
         }
     }

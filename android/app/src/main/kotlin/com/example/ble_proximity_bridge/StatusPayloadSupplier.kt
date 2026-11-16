@@ -118,6 +118,18 @@ class StatusPayloadSupplier(
             if (data == null || data.value.size < PAYLOAD_SIZE) return null
             return data.subdata(OFFSET_VERSION)?.uint32(0)?.value
         }
+
+        /**
+         * A payload for the log, e.g. `1A2B3C4D android st=2 col=3 rev=17
+         * online v3`. Same layout as `describe(_:)` on iOS.
+         */
+        fun describe(data: Data?): String {
+            val peerId = peerIdFrom(data) ?: return "(malformed)"
+            val device = deviceKindName(deviceKindFrom(data))
+            return "${peerHex(peerId)} $device st=${statusFrom(data)} col=${colorFrom(data)} " +
+                "rev=${revisionFrom(data) ?: "-"} " +
+                "${if (isOfflineFrom(data) == true) "OFFLINE" else "online"} v${versionFrom(data)}"
+        }
     }
 
     // Herald reads this on BLE threads while the platform thread writes
@@ -138,6 +150,7 @@ class StatusPayloadSupplier(
             this.peerId = peerId
             revision = revisions.next()
         }
+        logChange("new peer id")
     }
 
     /** The id we currently broadcast as. */
@@ -161,6 +174,7 @@ class StatusPayloadSupplier(
             this.color = newColor
             revision = revisions.next()
         }
+        logChange("status/color")
     }
 
     /** While offline, every payload we serve carries the goodbye flag. */
@@ -170,6 +184,20 @@ class StatusPayloadSupplier(
             this.offline = offline
             revision = revisions.next()
         }
+        logChange(if (offline) "going offline (goodbye)" else "back online (hello)")
+    }
+
+    /**
+     * What we broadcast, for the log. Carries `self=`, which tells
+     * tool/devlogs.dart which peer id is this device.
+     */
+    fun describe(): String = synchronized(lock) {
+        "self=${peerHex(peerId)} st=$status col=$color rev=$revision " +
+            (if (offline) "OFFLINE" else "online")
+    }
+
+    private fun logChange(reason: String) {
+        BridgeLog.i("payload", "broadcast now ${describe()} ($reason)")
     }
 
     /** Returns the current payload as a goodbye/hello frame. */

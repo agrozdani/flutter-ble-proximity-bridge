@@ -79,6 +79,7 @@ final class StatusPayloadSupplier: PayloadDataSupplier {
     self.status = newStatus
     self.color = newColor
     revision = revisions.next()
+    logChangeLocked("status/color")
   }
 
   func updatePeerId(_ peerId: Int) {
@@ -88,6 +89,7 @@ final class StatusPayloadSupplier: PayloadDataSupplier {
     guard newPeerId != self.peerId else { return }
     self.peerId = newPeerId
     revision = revisions.next()
+    logChangeLocked("new peer id")
   }
 
   /// Takes over the status and color of the supplier this one replaces.
@@ -108,6 +110,25 @@ final class StatusPayloadSupplier: PayloadDataSupplier {
     guard value != offline else { return }
     offline = value
     revision = revisions.next()
+    logChangeLocked(value ? "going offline (goodbye)" : "back online (hello)")
+  }
+
+  /// What we broadcast, for the log. Carries `self=`, which tells
+  /// tool/devlogs.dart which peer id is this device.
+  func describe() -> String {
+    lock.lock()
+    defer { lock.unlock() }
+    return describeLocked()
+  }
+
+  private func describeLocked() -> String {
+    "self=\(peerHex(Int(Int64(bitPattern: peerId)))) st=\(status) col=\(color) rev=\(revision) "
+      + (offline ? "OFFLINE" : "online")
+  }
+
+  /// Call with the lock held; the logger never takes it, so this is safe.
+  private func logChangeLocked(_ reason: String) {
+    BridgeLog.i("payload", "broadcast now \(describeLocked()) (\(reason))")
   }
 
   // MARK: - PayloadDataSupplier
@@ -190,6 +211,25 @@ final class StatusPayloadSupplier: PayloadDataSupplier {
       let value = data.advanced(by: 12).uint32(0)
     else { return nil }
     return Int(value)
+  }
+
+  /// A payload for the log, e.g. `1A2B3C4D ios st=2 col=3 rev=17 online
+  /// v3`. Same layout as `describe(data)` on Android.
+  static func describe(_ data: Data) -> String {
+    guard let id = Self.peerId(from: data) else { return "(malformed)" }
+    let device = Self.deviceKind(from: data).map(deviceKindName) ?? "dev=?"
+    let statusText = Self.status(from: data).map(String.init) ?? "?"
+    let colorText = Self.color(from: data).map(String.init) ?? "?"
+    let revisionText = Self.revision(from: data).map(String.init) ?? "-"
+    let state = Self.isOffline(from: data) == true ? "OFFLINE" : "online"
+    let versionText = Self.version(from: data).map(String.init) ?? "?"
+    return "\(peerHex(id)) \(device) st=\(statusText) col=\(colorText) rev=\(revisionText) "
+      + "\(state) v\(versionText)"
+  }
+
+  /// Lowercase hex of the bytes, for malformed payloads in the log.
+  static func hex(_ data: Data) -> String {
+    data.map { String(format: "%02x", $0) }.joined()
   }
 
   // MARK: - Decoder conveniences for Herald PayloadData

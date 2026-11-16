@@ -1,9 +1,13 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'src/logging/logging_setup.dart';
 import 'src/ui/home_screen.dart';
 
 void main() {
+  // The logging channels need the binding before runApp.
+  WidgetsFlutterBinding.ensureInitialized();
+  LoggingSetup.init();
   runApp(const ProviderScope(child: ProximityBridgeApp()));
 }
 

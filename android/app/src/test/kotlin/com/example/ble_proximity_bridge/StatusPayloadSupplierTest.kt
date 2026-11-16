@@ -205,4 +205,19 @@ class StatusPayloadSupplierTest {
         assertNull(StatusPayloadSupplier.revisionFrom(data))
         assertNull(StatusPayloadSupplier.peerIdFrom(null))
     }
+
+    @Test
+    fun `payloads are described for the log the same way as on iOS`() {
+        assertEquals(
+            "51C0FFEE android st=2 col=5 rev=2 online v3",
+            StatusPayloadSupplier.describe(Data(androidOnline)),
+        )
+        assertEquals(
+            "51C0FFEE ios st=2 col=5 rev=3 OFFLINE v3",
+            StatusPayloadSupplier.describe(Data(iosOffline)),
+        )
+        assertEquals("(malformed)", StatusPayloadSupplier.describe(Data(ByteArray(15))))
+        assertEquals("FFFFFFFFFFFFFFFF", peerHex(-1L))
+        assertEquals("0B5EAFE7", peerHex(0x0B5EAFE7L))
+    }
 }

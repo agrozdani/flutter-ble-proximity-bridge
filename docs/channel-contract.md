@@ -18,6 +18,8 @@ The Dart side of the contract is verified by
 | `ble_proximity_bridge/methods` | MethodChannel | Dart → native (commands) |
 | `ble_proximity_bridge/events` | EventChannel | native → Dart (event stream) |
 
+Two more channels carry diagnostics only and never affect the bridge; see
+[Diagnostics channels](#diagnostics-channels).
 ## Methods
 
 ### `start`
@@ -44,7 +46,7 @@ A failure after acceptance arrives as an error on the event stream (see
 [Errors](#errors)). iOS has no such failure: Herald starts even with
 Bluetooth off or unauthorized and starts scanning once Bluetooth is
 available (it reports the state through its `didUpdateState` callback,
-which this demo does not surface).
+which this demo logs, as `native.ble`, but does not surface to Dart).
 
 ### `updateStatus`
 
@@ -220,6 +222,29 @@ restart it pushes the online payload as a hello. Receivers feed these
 frames through the same decoder as payload reads — one codec, two
 transports. (Which peers a frame reaches depends on the platform; see
 [architecture.md](architecture.md#stopping-is-a-protocol-problem).)
+
+## Diagnostics channels
+
+The logging system ([logging.md](logging.md)) has its own pair of
+channels, declared in `LogChannels` / `LogMethods` / `LogArgs` in
+`channel_names.dart` and as `LOG_*` constants next to the bridge's on each
+platform.
+
+| Channel | Type | Direction |
+|---|---|---|
+| `ble_proximity_bridge/log` | MethodChannel | Dart → native |
+| `ble_proximity_bridge/logs` | EventChannel | native → Dart |
+
+Methods on `ble_proximity_bridge/log`:
+
+| Method | Arguments | Result |
+|---|---|---|
+| `configure` | `level` (`debug`/`info`/`warn`/`error`), `herald` (`off`/`fault`/`info`/`debug`) | `{file: String?, echo: bool}`: the native log file's path, and whether Dart should print native lines (true on the iOS simulator) |
+| `write` | `lines`: `List<String>` of formatted Dart lines | `null`; native appends them to its log file |
+
+Events on `ble_proximity_bridge/logs` are `List<String>` batches of
+formatted native lines. Lines logged while nothing listens are held (up to
+5000) and sent when Dart subscribes.
 
 ## Channel codec notes
 

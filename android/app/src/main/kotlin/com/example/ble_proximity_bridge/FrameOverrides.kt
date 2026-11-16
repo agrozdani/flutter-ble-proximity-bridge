@@ -1,6 +1,7 @@
 package com.example.ble_proximity_bridge
 
 import android.os.SystemClock
+import java.util.Locale
 
 /**
  * Decides which payload to believe for a peer: the one Herald just handed
@@ -86,6 +87,37 @@ class FrameOverrides(
         val revision: Int? = null,
     )
 
+    /** Why [resolveExplained] decided what it did; logged by the pipeline. */
+    enum class Verdict(val description: String) {
+        FRAME_RECORDED("frame recorded"),
+        FRAME_LATE("dropped: older than the newest revision"),
+        READ_ACCEPTED("accepted"),
+        READ_ENDS_FRAME("accepted; ends the frame's override"),
+        READ_STALE("dropped: older than the newest revision"),
+        CACHED_ACCEPTED("accepted"),
+        CACHED_NEWER_THAN_FRAME("accepted: newer than the frame, which it ends"),
+        CACHED_HIDDEN_BY_GOODBYE("ignored: the peer's goodbye frame outvotes it"),
+        CACHED_REPLACED_BY_HELLO("replaced by the peer's hello frame"),
+        CACHED_REPLACED_BY_NEWEST("replaced by the newest payload (it is older)"),
+        CACHED_BELIEVED_AFTER_GOODBYE(
+            "accepted: older, but the goodbye ran out (likely a restart whose hello was lost)",
+        ),
+        CACHED_DROPPED_AFTER_OFFLINE_READ("ignored: older than a read that said offline"),
+        ;
+
+        /** The name in the stats line, as on iOS: `cachedAccepted`. */
+        val key: String
+            get() = name.lowercase().split('_').mapIndexed { index, part ->
+                if (index == 0) part else part.replaceFirstChar { it.uppercase() }
+            }.joinToString("")
+    }
+
+    /**
+     * What [resolveExplained] returns: the payload to act on (null: ignore
+     * it), why, and what it was weighed against, for the log.
+     */
+    class Resolution(val payload: Payload?, val verdict: Verdict, val context: String)
+
     private enum class Order { NEWER, SAME, OLDER }
 
     private class Frame(val payload: Payload, val recordedAt: Long, val lifetime: Long)
@@ -101,12 +133,18 @@ class FrameOverrides(
      * must be ignored: a cached copy of a peer whose goodbye frame was
      * already reported, or a payload older than one already seen.
      */
+    fun resolve(peerId: Long, source: Source, payload: Payload): Payload? =
+        resolveExplained(peerId, source, payload).payload
+
+    /** [resolve], plus why. */
     @Synchronized
-    fun resolve(peerId: Long, source: Source, payload: Payload): Payload? {
+    fun resolveExplained(peerId: Long, source: Source, payload: Payload): Resolution {
         sweepIfDue()
         val known = unexpiredNewest(peerId)
         val stale = known != null &&
             order(payload.revision, known.payload.revision) == Order.OLDER
+        // What this payload is weighed against, before anything changes.
+        val context = describe(known, peekFrame(peerId))
         // Only what the peer sent us itself is remembered (see above).
         if (!stale && source != Source.CACHED) {
             newest[peerId] = Newest(payload, now(), source == Source.FRAME)
@@ -115,17 +153,19 @@ class FrameOverrides(
         when (source) {
             Source.FRAME -> {
                 // Delivered late: the peer has sent something newer since.
-                if (stale) return null
+                if (stale) return Resolution(null, Verdict.FRAME_LATE, context)
                 frames[peerId] = Frame(payload, now(), lifetimeOf(payload))
-                return payload
+                return Resolution(payload, Verdict.FRAME_RECORDED, context)
             }
             Source.READ -> {
                 // Older than what the peer has sent since: a read a frame
                 // overtook, or a stale relayed copy. It changes nothing.
-                if (stale) return null
+                if (stale) return Resolution(null, Verdict.READ_STALE, context)
                 // Newer than any frame, so the frame's job is done.
+                val hadFrame = peekFrame(peerId) != null
                 frames.remove(peerId)
-                return payload
+                val verdict = if (hadFrame) Verdict.READ_ENDS_FRAME else Verdict.READ_ACCEPTED
+                return Resolution(payload, verdict, context)
             }
             Source.CACHED -> {
                 val frame = unexpiredFrame(peerId)
@@ -136,23 +176,40 @@ class FrameOverrides(
                     if (order(payload.revision, frame.payload.revision) == Order.NEWER) {
                         // Herald holds something newer than the frame.
                         frames.remove(peerId)
-                        return payload
+                        return Resolution(payload, Verdict.CACHED_NEWER_THAN_FRAME, context)
                     }
                     // After a hello, report the peer as the frame described it.
-                    return if (frame.payload.offline) null else frame.payload
+                    return if (frame.payload.offline) {
+                        Resolution(null, Verdict.CACHED_HIDDEN_BY_GOODBYE, context)
+                    } else {
+                        Resolution(frame.payload, Verdict.CACHED_REPLACED_BY_HELLO, context)
+                    }
                 }
                 // Stale implies a known newest payload.
-                if (!stale) return payload
+                if (!stale) return Resolution(payload, Verdict.CACHED_ACCEPTED, context)
                 return when {
-                    !known.payload.offline -> known.payload
+                    !known.payload.offline ->
+                        Resolution(known.payload, Verdict.CACHED_REPLACED_BY_NEWEST, context)
                     // The goodbye has run out: likely a restart whose hello
                     // never arrived, so believe the reading.
-                    known.fromFrame -> payload
+                    known.fromFrame ->
+                        Resolution(payload, Verdict.CACHED_BELIEVED_AFTER_GOODBYE, context)
                     // A fresh read said offline; this older copy is a relay's.
-                    else -> null
+                    else -> Resolution(null, Verdict.CACHED_DROPPED_AFTER_OFFLINE_READ, context)
                 }
             }
         }
+    }
+
+    /**
+     * What is remembered for each peer that still has an unexpired entry,
+     * for the periodic stats line.
+     */
+    @Synchronized
+    fun snapshot(): Map<Long, String> {
+        val ids = frames.keys + newest.keys
+        return ids.associateWith { describe(peekNewest(it), peekFrame(it)) }
+            .filterValues { it != NOTHING_REMEMBERED }
     }
 
     @Synchronized
@@ -165,12 +222,41 @@ class FrameOverrides(
     @Synchronized
     internal fun trackedPeerCount(): Int = (frames.keys + newest.keys).size
 
+    /** E.g. `newest rev=17 online (read 3.2s ago) | frame goodbye rev=18 (1.8s left)`. */
+    private fun describe(known: Newest?, frame: Frame?): String {
+        if (known == null && frame == null) return NOTHING_REMEMBERED
+        val time = now()
+        val parts = mutableListOf<String>()
+        if (known != null) {
+            val origin = if (known.fromFrame) "frame" else "read"
+            parts += "newest rev=${known.payload.revision ?: "-"} " +
+                "${if (known.payload.offline) "offline" else "online"} " +
+                "($origin ${seconds(time - known.confirmedAt)} ago)"
+        }
+        if (frame != null) {
+            parts += "frame ${if (frame.payload.offline) "goodbye" else "hello"} " +
+                "rev=${frame.payload.revision ?: "-"} " +
+                "(${seconds(frame.lifetime - (time - frame.recordedAt))} left)"
+        }
+        return parts.joinToString(" | ")
+    }
+
+    private fun seconds(millis: Long) = String.format(Locale.US, "%.1fs", millis / 1000.0)
+
     private fun lifetimeOf(frame: Payload): Long =
         if (frame.offline && frame.deviceKind == StatusPayloadSupplier.DEVICE_KIND_IOS) {
             iphoneGoodbyeTtlMillis
         } else {
             ttlMillis
         }
+
+    // Lookups for the log: like the two below, but they leave expired
+    // entries in place, so logging never changes the state.
+    private fun peekFrame(peerId: Long): Frame? =
+        frames[peerId]?.takeIf { now() - it.recordedAt <= it.lifetime }
+
+    private fun peekNewest(peerId: Long): Newest? =
+        newest[peerId]?.takeIf { now() - it.confirmedAt <= revisionMemoryMillis }
 
     private fun unexpiredFrame(peerId: Long): Frame? {
         val entry = frames[peerId] ?: return null
@@ -217,5 +303,6 @@ class FrameOverrides(
 
     private companion object {
         const val HALF_RANGE = (StatusPayloadSupplier.REVISION_MASK + 1) / 2
+        const val NOTHING_REMEMBERED = "nothing remembered"
     }
 }

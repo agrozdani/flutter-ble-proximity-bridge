@@ -5,6 +5,7 @@ import 'package:permission_handler/permission_handler.dart';
 
 import '../providers/bridge_provider.dart';
 import '../providers/peers_provider.dart';
+import 'log_screen.dart';
 import 'peer_tile.dart';
 import 'permissions.dart';
 import 'status_picker.dart';
@@ -49,7 +50,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('BLE Proximity Bridge'),
-        actions: [_PhaseChip(phase: bridge.phase)],
+        actions: [
+          IconButton(
+            tooltip: 'Logs',
+            icon: const Icon(Icons.receipt_long),
+            onPressed: () => Navigator.of(
+              context,
+            ).push(MaterialPageRoute<void>(builder: (_) => const LogScreen())),
+          ),
+          _PhaseChip(phase: bridge.phase),
+        ],
       ),
       body: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
