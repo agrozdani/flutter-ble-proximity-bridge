@@ -36,7 +36,8 @@ void main() {
         '11-16 10:15:03.125  4321  4321 I BPB     : $native',
         // flutter run on Android
         'I/BPB     ( 4321): $native',
-        // flutter run on iOS (os_log category kept by the tool)
+        // an os_log line with its metadata stripped by flutter_tools
+        // (category kept)
         '[BPB] $native',
         // Console / log stream
         '2026-11-16 10:15:03.125 Df Runner[1:2] [com.example:BPB] $native',

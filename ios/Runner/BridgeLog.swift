@@ -10,11 +10,11 @@ import os
 /// merge the same way.
 ///
 /// Each line goes:
-/// - to os_log (subsystem: the bundle id, category `BPB`). `flutter run`
-///   shows it: with Xcode 26 or later it launches the app through devicectl
-///   with `OS_ACTIVITY_DT_MODE`, which mirrors os_log to the console. Lines
-///   are logged at `.default` (`.error` for errors), because that mirror
-///   leaves out `.debug` messages; the line carries its own level letter.
+/// - to the console, which is one of two (see `Console`, decided once per
+///   launch): stderr when the app was launched with `OS_ACTIVITY_DT_MODE`
+///   set, as `flutter run` on a device and Xcode's test runner do; otherwise
+///   os_log (subsystem: the bundle id, category `BPB`), at `.default`
+///   (`.error` for errors), the line carrying its own level letter.
 /// - to the log file (Documents/logs/bridge.log), which also receives Dart's
 ///   lines, so it holds the whole run. The previous `keptFiles - 1` files are
 ///   kept (bridge.1.log is the previous launch, or the first part of this one
@@ -52,6 +52,105 @@ final class BridgeLog {
     static func < (lhs: Level, rhs: Level) -> Bool { lhs.rawValue < rhs.rawValue }
   }
 
+  /// Where a line is written for a console to show (besides the file and
+  /// Dart). Checked on an iPad (iPad8,11, iOS 27.2.1, Xcode 27.2, Flutter
+  /// 3.47.9) and an iOS 26.4 simulator, 2026-11-16; docs/logging.md:
+  ///
+  /// - `flutter run` on a device launches the app with `devicectl
+  ///   --console` and `OS_ACTIVITY_DT_MODE=enable`. That mirrors every
+  ///   os_log message, `.debug` included, to the app's stderr, but as
+  ///   `<time> Runner[pid:tid] [BPB] <line>`, and flutter_tools does not
+  ///   print console lines with that prefix (only as `-v` trace) unless the
+  ///   message starts with `flutter:` or an engine tag. A line written to
+  ///   stderr as it is shows, once.
+  /// - Xcode's test runner (tool/ios_ui_test.sh) sets
+  ///   `OS_ACTIVITY_DT_MODE=YES`; 1 MB written to stderr there took 51 ms,
+  ///   so it is read, and writing did not stall the app.
+  /// - The simulator under `flutter run` (`simctl launch`), a device launch
+  ///   without a console (`devicectl device process launch`, as
+  ///   `flutter run --release` does) and a run from Xcode (its Run button,
+  ///   or its scripting `debug` command, which flutter_tools falls back to
+  ///   when LLDB is off or its launch fails) get no `OS_ACTIVITY_DT_MODE`.
+  ///   Xcode's console showed each os_log line once.
+  ///
+  /// With the variable set, os_log is skipped rather than written as well:
+  /// its mirror copy would otherwise sit next to ours in any console that
+  /// shows both (`flutter run -v` does). The cost is that Console.app and
+  /// `log stream` do not see our lines during such a launch; the log file
+  /// has them all. Lines go out through a `ConsoleWriter`.
+  enum Console: Equatable {
+    case osLog
+    case standardError
+
+    static let modeVariable = "OS_ACTIVITY_DT_MODE"
+
+    /// Any non-empty value counts. Only `enable` (flutter_tools) and `YES`
+    /// (Xcode's test runner) were seen.
+    init(environment: [String: String]) {
+      let mode = environment[Self.modeVariable] ?? ""
+      self = mode.isEmpty ? .osLog : .standardError
+    }
+  }
+
+  /// Whether Dart should print the native lines it receives: only when they
+  /// go to os_log on a simulator. `flutter run` does not show them there: it
+  /// filters the simulator's os_log to messages from the app's main
+  /// executable, and debug builds put the app's code in Runner.debug.dylib
+  /// (`ENABLE_DEBUG_DYLIB`). With `.standardError` the console already has each
+  /// line, so an echo would print it twice; on a device without
+  /// `OS_ACTIVITY_DT_MODE` no console of flutter_tools reads the app's
+  /// output, so an echo would only add a second copy to os_log.
+  static func dartShouldEcho(console: Console, simulator: Bool) -> Bool {
+    console == .osLog && simulator
+  }
+
+  /// Writes lines to a file descriptor (stderr in the app). It has its own
+  /// lock, taken after the logger's lock is released, so a reader that
+  /// stops reading holds up only the threads writing to the console, never
+  /// the log file, Dart, or `isEnabled` callers.
+  final class ConsoleWriter {
+    private let lock = NSLock()
+    private let fd: Int32
+
+    /// Whether SIGPIPE is off for `fd`: a write after the reader closed a
+    /// pipe then fails with EPIPE instead of raising SIGPIPE. The app
+    /// already ignores SIGPIPE in every launch checked (SIG_IGN before
+    /// BridgeLog starts; who sets it was not found), so this is a guard in
+    /// case that changes.
+    let sigpipeOff: Bool
+
+    init(fd: Int32) {
+      self.fd = fd
+      sigpipeOff = fcntl(fd, F_SETNOSIGPIPE, 1) != -1
+    }
+
+    /// One unbuffered write(2) per line, more only if the kernel takes part
+    /// of it; one line at a time, so lines from different threads do not
+    /// interleave. True when the whole line went out. Errors end the line:
+    /// it is in the log file anyway.
+    @discardableResult
+    func write(_ line: String) -> Bool {
+      let bytes = Array((line + "\n").utf8)
+      lock.lock()
+      defer { lock.unlock() }
+      return bytes.withUnsafeBytes { buffer -> Bool in
+        guard let base = buffer.baseAddress else { return false }
+        var offset = 0
+        while offset < buffer.count {
+          let written = Darwin.write(fd, base + offset, buffer.count - offset)
+          if written > 0 {
+            offset += written
+          } else if written < 0 && errno == EINTR {
+            continue
+          } else {
+            return false
+          }
+        }
+        return true
+      }
+    }
+  }
+
   static let shared = BridgeLog()
 
   private static let fileName = "bridge.log"
@@ -70,7 +169,13 @@ final class BridgeLog {
   private var pendingDropped = 0
   private var dartSink: FlutterEventSink?
   private var drainScheduled = false
+  /// Problems with the log file itself, reported once the lock is released.
+  private var problems: [String] = []
+  /// Set when `console` is `.standardError`; tests swap it.
+  private var consoleWriter: ConsoleWriter?
 
+  /// Fixed for the process: the environment does not change after launch.
+  let console = Console(environment: ProcessInfo.processInfo.environment)
   private let osLog = Logger(
     subsystem: Bundle.main.bundleIdentifier ?? "ble_proximity_bridge", category: "BPB")
   private let formatter: DateFormatter = {
@@ -82,6 +187,7 @@ final class BridgeLog {
   }()
 
   private init() {
+    if console == .standardError { consoleWriter = ConsoleWriter(fd: STDERR_FILENO) }
     openFile()
     installCrashHandler()
     let info = Bundle.main.infoDictionary
@@ -95,6 +201,7 @@ final class BridgeLog {
       "device \(Self.modelIdentifier()) iOS \(process.operatingSystemVersionString) "
         + "lowPower=\(process.isLowPowerModeEnabled)")
     log(.info, "log", "file \(currentFile?.path ?? "none")")
+    log(.info, "log", "console \(consoleDescription)")
     log(.info, "ble", "authorization \(Self.bluetoothAuthorization())")
   }
 
@@ -125,20 +232,26 @@ final class BridgeLog {
   /// The file being written.
   var currentFile: URL? { directory?.appendingPathComponent(Self.fileName) }
 
-  /// Whether Dart should print the native lines it receives. On a simulator
-  /// `flutter run` does not show them: it filters the simulator's os_log to
-  /// messages from the app's main executable, and debug builds (Xcode 15+)
-  /// put the app's code in Runner.debug.dylib. On a device Dart does not
-  /// echo by default, since a console that shows native lines on its own
-  /// would then print each twice. On an iPad (iOS 27.2.1, Xcode 27.2,
-  /// Flutter 3.47.9) `flutter run` did not show them, though; run with
-  /// `--dart-define=LOG_ECHO_NATIVE=true` there (docs/logging.md).
+  /// For this process; see `dartShouldEcho(console:simulator:)`.
   static var dartShouldEcho: Bool {
     #if targetEnvironment(simulator)
-      return true
+      let simulator = true
     #else
-      return false
+      let simulator = false
     #endif
+    return dartShouldEcho(console: shared.console, simulator: simulator)
+  }
+
+  /// For the log header, e.g.
+  /// `stderr (OS_ACTIVITY_DT_MODE=enable, SIGPIPE off)`.
+  private var consoleDescription: String {
+    switch console {
+    case .osLog: return "os_log"
+    case .standardError:
+      let mode = ProcessInfo.processInfo.environment[Console.modeVariable] ?? ""
+      let sigpipe = consoleWriter?.sigpipeOff == true ? "off" : "ON"
+      return "stderr (\(Console.modeVariable)=\(mode), SIGPIPE \(sigpipe))"
+    }
   }
 
   /// Herald's own log level, applied to every Herald host we build.
@@ -172,7 +285,9 @@ final class BridgeLog {
     let line =
       "\(formatter.string(from: Date())) \(level.letter) native.\(component) "
       + "[\(Self.queueLabel())] \(message())"
-    osLog.log(level: level == .error ? .error : .default, "\(line, privacy: .public)")
+    if console == .osLog {
+      osLog.log(level: level == .error ? .error : .default, "\(line, privacy: .public)")
+    }
 
     lock.lock()
     write(line)
@@ -182,8 +297,13 @@ final class BridgeLog {
       pendingDropped += 1
     }
     let drain = scheduleDrainLocked()
+    let writer = consoleWriter
     lock.unlock()
     if drain { DispatchQueue.main.async { self.drain() } }
+    // After unlocking: see ConsoleWriter. Two threads' lines can reach the
+    // console in a different order than the file by a line; each is whole.
+    writer?.write(line)
+    reportProblems()
   }
 
   private func log(_ level: Level, _ component: String, _ message: String) {
@@ -191,12 +311,24 @@ final class BridgeLog {
   }
 
   /// Appends lines Dart already formatted to the file. They are not sent to
-  /// os_log (Dart printed them) or back to Dart.
+  /// the console (Dart printed them) or back to Dart.
   static func writeFromDart(_ lines: [String]) {
     let logger = shared
     logger.lock.lock()
     lines.forEach(logger.write)
     logger.lock.unlock()
+    logger.reportProblems()
+  }
+
+  /// Logs (as errors, so they reach the console and Dart) the problems
+  /// `write` and `openHandle` recorded. Call without the lock. Logging one
+  /// cannot record another: the failed file handle is gone by then.
+  private func reportProblems() {
+    lock.lock()
+    let found = problems
+    problems.removeAll()
+    lock.unlock()
+    for problem in found { log(.error, "log", problem) }
   }
 
   // MARK: - Dart
@@ -259,7 +391,7 @@ final class BridgeLog {
         }
       }
     } catch {
-      osLog.error("Log file write failed; file logging stops: \(error.localizedDescription, privacy: .public)")
+      problems.append("log file write failed; file logging stops: \(error.localizedDescription)")
       try? handle.close()
       self.handle = nil
     }
@@ -281,7 +413,7 @@ final class BridgeLog {
     FileManager.default.createFile(atPath: url.path, contents: nil)
     handle = try? FileHandle(forWritingTo: url)
     fileBytes = 0
-    if handle == nil { osLog.error("Cannot open the log file; logging to os_log only") }
+    if handle == nil { problems.append("cannot open the log file; logging to the console only") }
   }
 
   /// bridge.log → bridge.1.log → bridge.2.log; the oldest is dropped.
@@ -296,6 +428,33 @@ final class BridgeLog {
     where files.fileExists(atPath: url(index).path) {
       try? files.moveItem(at: url(index), to: url(index + 1))
     }
+  }
+
+  // MARK: - Tests
+
+  /// Swaps the console writer (nil: none); returns the previous one.
+  func replaceConsoleWriterForTesting(_ writer: ConsoleWriter?) -> ConsoleWriter? {
+    lock.lock()
+    defer { lock.unlock() }
+    let previous = consoleWriter
+    consoleWriter = writer
+    return previous
+  }
+
+  /// Closes the file handle behind the logger's back, so the next write
+  /// fails as a real I/O error would.
+  func breakLogFileForTesting() {
+    lock.lock()
+    try? handle?.close()
+    lock.unlock()
+  }
+
+  /// Opens bridge.log again (truncated) after `breakLogFileForTesting`.
+  func reopenLogFileForTesting() {
+    lock.lock()
+    openHandle()
+    lock.unlock()
+    reportProblems()
   }
 
   // MARK: - Helpers
