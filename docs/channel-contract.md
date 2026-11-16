@@ -248,7 +248,7 @@ Methods on `ble_proximity_bridge/log`:
 
 | Method | Arguments | Result |
 |---|---|---|
-| `configure` | `level` (`debug`/`info`/`warn`/`error`), `herald` (`off`/`fault`/`info`/`debug`) | `{file: String?, echo: bool}`: the native log file's path, and whether Dart should print native lines (true on the iOS simulator) |
+| `configure` | `level` (`debug`/`info`/`warn`/`error`), `herald` (`off`/`fault`/`info`/`debug`) | `{file: String?, echo: bool}`: the native log file's path, and whether Dart should print native lines (true on the iOS simulator when native logs to os_log; false where it writes to stderr, e.g. under Xcode's test runner; see [logging.md](logging.md)) |
 | `write` | `lines`: `List<String>` of formatted Dart lines | `null`; native appends them to its log file |
 
 Events on `ble_proximity_bridge/logs` are `List<String>` batches of

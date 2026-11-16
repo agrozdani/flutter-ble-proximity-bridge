@@ -69,9 +69,10 @@ sit next to the native lines of the calls they describe.
   `BPB` lines appear on their own. It learns the process id only once it
   connects to the Dart VM; the first few native lines of a launch (the log
   header) are in logcat and the file but not in `flutter run`.
-- iOS device, Xcode 26 or later, debug and profile: the tool launches the
-  app with `xcrun devicectl device process launch --console
-  --environment-variables {"OS_ACTIVITY_DT_MODE": "enable"}` (in debug also
+- iOS device (iOS 17 or later), Xcode 26 or later, debug and profile: the
+  tool launches the app with `xcrun devicectl device process launch
+  --console --environment-variables {"OS_ACTIVITY_DT_MODE": "enable"}` (in
+  debug, and in profile with `--ios-profile-debugger`, also
   `--start-stopped`, then LLDB attaches) and prints what that console
   outputs (`core_devices.dart`, `_launchAppCommand`). `OS_ACTIVITY_DT_MODE`
   mirrors every os_log message to the app's stderr, `.debug` included, as
@@ -103,16 +104,16 @@ sit next to the native lines of the calls they describe.
   lines there.
 
 The first `native.log` lines of each launch say which way lines go:
-`console stderr (OS_ACTIVITY_DT_MODE=enable)` under `flutter run` on a
-device, `stderr (OS_ACTIVITY_DT_MODE=YES)` under Xcode's test runner
-(tool/ios_ui_test.sh), `console os_log` otherwise. Checked on an iPad
-(iPad8,11, iOS 27.2.1, Xcode 27.2, Flutter 3.47.9) and an iOS 26.4
-simulator, 2026-11-16:
+`console stderr (OS_ACTIVITY_DT_MODE=enable, SIGPIPE off)` under `flutter
+run` on a device, `stderr (OS_ACTIVITY_DT_MODE=YES, SIGPIPE off)` under
+Xcode's test runner (tool/ios_ui_test.sh), `console os_log` otherwise.
+Checked on an iPad (iPad8,11, iOS 27.2.1, Xcode 27.2, Flutter 3.47.9) and
+an iOS 26.4 simulator, 2026-11-16:
 
 | Launch | Console | Native lines shown |
 |---|---|---|
 | `flutter run` (debug) on the iPad | stderr | once each, launch header included; also after a hot restart |
-| `flutter run --profile` on the iPad | stderr | once each, launch header included |
+| `flutter run --profile` on the iPad | stderr | once each, launch header included (see below) |
 | `flutter debug_adapter` (what VS Code runs), debug, on the iPad | stderr | once each as DAP `output` events (`console` before the app starts, `stdout` after); also after a hot restart |
 | VS Code, F5, debug, on the iPad | stderr | once each in the Debug Console, launch header included |
 | Xcode's Run button, debug, on the iPad | os_log | once each in Xcode's console, launch header included |
@@ -126,11 +127,25 @@ While the variable is set our lines are not in os_log, so Console.app and
 was not seen to stall the app: under Xcode's test runner 1 MB went out in
 51 ms, and after `flutter run` and its devicectl were killed (the app kept
 running), the app went on writing a 2 KB line every 5 s for the 2 min 40 s
-it was watched.
+it was watched. Should a reader stop reading anyway, only the threads
+writing to the console wait: the console write happens after the logger's
+lock is released, so the log file, Dart and the main thread carry on
+(pinned by `BridgeLogConsoleWriterTests`). SIGPIPE is ignored in the app in
+every launch checked (`SIG_IGN` before the logger starts, under `flutter
+run`, Xcode's test runner and a plain devicectl launch); the console's fd
+also has `F_SETNOSIGPIPE` set, shown as `SIGPIPE off` in the `console`
+line, in case that changes. Problems with the log file itself (it cannot
+be opened or written) are logged as errors, so they reach the console.
+
+In profile the tool shows console output only after devicectl prints
+`Waiting for the application to terminate` (`launchAppAndStreamLogs`), and
+without `--start-stopped` the app may already be logging by then. The
+launch header did show in the profile run checked, but lines written that
+early are not guaranteed to.
 
 VS Code's Debug Console (F5 on the iPad, debug, 2026-11-16) showed each
 native line once without a `flutter:` prefix, from the launch header and
-`console stderr (OS_ACTIVITY_DT_MODE=enable)` on. Xcode's Run button
+`console stderr` line on. Xcode's Run button
 (debug, on the iPad, same day) gave the app no `OS_ACTIVITY_DT_MODE`: it
 logged `console os_log`, and Xcode's console showed each native line once,
 as an os_log entry (category `BPB`, library `Runner.debug.dylib`).

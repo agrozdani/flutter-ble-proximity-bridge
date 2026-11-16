@@ -10,8 +10,8 @@
 /// logged on in brackets at the start of the message. A message can span
 /// several lines (stack traces); the continuation lines carry no prefix.
 ///
-/// Every place a line ends up (logcat, os_log, `flutter run`, the on-device
-/// log file, the in-app viewer) carries it verbatim, so [LogLine.find] can
+/// Every place a line ends up (logcat, os_log, stderr, `flutter run`, the
+/// on-device log file, the in-app viewer) carries it verbatim, so [LogLine.find] can
 /// pick it out of any of them, whatever prefix they add. tool/devlogs.dart
 /// relies on that to merge the logs of several devices into one timeline.
 ///
