@@ -56,8 +56,9 @@ final class DistanceEstimator {
 
     private let cutoffs: [Double]
 
-    // (uptime seconds, rssi) pairs. systemUptime is monotonic, so clock
-    // changes can't mess up the window.
+    // (monotonic seconds, rssi) pairs. MonotonicClock ignores wall-clock
+    // changes and keeps counting while the device sleeps, so neither can
+    // distort the window.
     private var window: [(time: Double, rssi: Double)] = []
     private let kalman = KalmanFilter1D(
       measurementNoise: 2.0,
@@ -73,7 +74,7 @@ final class DistanceEstimator {
     }
 
     func addAndEstimate(_ rssi: Double) -> Double? {
-      let now = ProcessInfo.processInfo.systemUptime
+      let now = MonotonicClock.seconds()
       window.append((time: now, rssi: rssi))
       if window.count > PeerModel.maxSamples {
         window.removeFirst(window.count - PeerModel.maxSamples)

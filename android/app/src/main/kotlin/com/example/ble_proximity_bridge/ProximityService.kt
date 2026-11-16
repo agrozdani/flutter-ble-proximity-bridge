@@ -16,17 +16,9 @@ import android.os.Looper
 import android.util.Log
 import io.flutter.plugin.common.EventChannel
 import io.heraldprox.herald.sensor.SensorArray
-import io.heraldprox.herald.sensor.SensorDelegate
+import io.heraldprox.herald.sensor.datatype.PayloadData
 import io.heraldprox.herald.sensor.ble.BLESensorConfiguration
 import io.heraldprox.herald.sensor.data.SensorLoggerLevel
-import io.heraldprox.herald.sensor.datatype.Data
-import io.heraldprox.herald.sensor.datatype.ImmediateSendData
-import io.heraldprox.herald.sensor.datatype.Location
-import io.heraldprox.herald.sensor.datatype.PayloadData
-import io.heraldprox.herald.sensor.datatype.Proximity
-import io.heraldprox.herald.sensor.datatype.SensorState
-import io.heraldprox.herald.sensor.datatype.SensorType
-import io.heraldprox.herald.sensor.datatype.TargetIdentifier
 import io.heraldprox.herald.sensor.datatype.TimeInterval
 import java.util.UUID
 import java.util.concurrent.Executors
@@ -41,7 +33,7 @@ import java.util.concurrent.atomic.AtomicReference
  * The Herald host is reused across stop/start, so a logical stop is sent in
  * the payload with an offline flag plus a goodbye frame.
  */
-class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
+class ProximityService : Service(), EventChannel.StreamHandler {
 
     companion object {
         private const val TAG = "ProximityService"
@@ -56,9 +48,10 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
 
         /**
          * How long a hello, or a goodbye from an Android device, outvotes
-         * the payload Herald has cached for that peer. The next re-read
-         * replaces the cached copy within one refresh interval; two leaves
-         * room for a slow one.
+         * the payload Herald has cached for that peer. After a hello, the
+         * next re-read replaces the cached copy within one refresh interval;
+         * two leave room for a slow one. A stopped Android device cannot be
+         * re-read at all, so its goodbye simply runs out.
          */
         private val FRAME_OVERRIDE_MILLIS = 2 * PAYLOAD_REFRESH.millis()
 
@@ -77,6 +70,14 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
          * let those readings bring it back sooner than 30 s would.
          */
         private const val IPHONE_GOODBYE_OVERRIDE_MILLIS = 5_000L
+
+        /**
+         * How long the newest payload revision seen from a peer is
+         * remembered after it was last confirmed. Long enough to outlast
+         * stale relays between our re-reads, short enough that a 7-bit
+         * revision cannot wrap around unnoticed in between.
+         */
+        private const val REVISION_MEMORY_MILLIS = 60_000L
 
         const val EXTRA_SESSION_ID = "sessionId"
         const val EXTRA_PEER_ID = "peerId"
@@ -122,8 +123,27 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
 
     val distanceEstimator = DistanceEstimator()
 
-    private val frameOverrides =
-        FrameOverrides(FRAME_OVERRIDE_MILLIS, IPHONE_GOODBYE_OVERRIDE_MILLIS)
+    private val frameOverrides = FrameOverrides(
+        FRAME_OVERRIDE_MILLIS, IPHONE_GOODBYE_OVERRIDE_MILLIS, REVISION_MEMORY_MILLIS,
+    )
+
+    /** Herald's delegate: turns its payload callbacks into sightings. */
+    private val payloadPipeline = PayloadPipeline(
+        frameOverrides,
+        isActive = { sourceMode == SourceMode.BLE },
+        localPeerId = { payloadSupplier?.currentPeerId() },
+        listener = object : PayloadPipeline.Listener {
+            override fun onSighting(
+                peerId: Long,
+                status: Int,
+                color: Int,
+                deviceKind: Int,
+                rssi: Double?,
+            ) = handleSighting(peerId, status, color, deviceKind, rssi)
+
+            override fun onGone(peerId: Long) = emitGone(peerId)
+        },
+    )
 
     /** The Herald host. Rebuilt only when the session id changes. */
     private var sensorArray: SensorArray? = null
@@ -204,7 +224,8 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
         mockSource?.stop()
         mockSource = null
         distanceEstimator.clear()
-        frameOverrides.clearAll()
+        // frameOverrides is kept: the host, and with it Herald's cached
+        // payloads, survives our stop/start, so the overrides still apply.
 
         if (mock) {
             // A racing stop may have left the BLE host running, so always
@@ -267,10 +288,10 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
     fun stopProximity() {
         mockSource?.stop()
         mockSource = null
-        // Flip the mode first so any late Herald callbacks get ignored.
+        // Flip the mode first so late Herald callbacks are no longer
+        // reported (PayloadPipeline still records them).
         sourceMode = SourceMode.IDLE
         distanceEstimator.clear()
-        frameOverrides.clearAll()
         // The BLE host may still be up even if the current mode was mock.
         quiesceBleHost()
         // Keep the host and supplier around so lingering peers read the
@@ -328,10 +349,12 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
         BLESensorConfiguration.legacyHeraldServiceDetectionEnabled = false
         BLESensorConfiguration.logLevel = SensorLoggerLevel.off
 
-        val newSupplier = StatusPayloadSupplier(peerId)
-        previousSupplier?.let { newSupplier.adoptStatus(it) }
+        val newSupplier = StatusPayloadSupplier.forRebuiltHost(peerId, previousSupplier)
+        // A new host starts with an empty Herald cache, so overrides of the
+        // old one's cached payloads no longer apply.
+        frameOverrides.clearAll()
         val newHost = SensorArray(applicationContext, newSupplier)
-        newHost.add(this)
+        newHost.add(payloadPipeline)
         payloadSupplier = newSupplier
         sensorArray = newHost
         bleHostSessionId = sessionId
@@ -390,103 +413,9 @@ class ProximityService : Service(), SensorDelegate, EventChannel.StreamHandler {
         sendReady()
     }
 
-    // ----- Herald SensorDelegate ----------------------------------------------
-    // Herald reports through many sensor() overloads. We only care about
-    // the ones that carry a payload.
-
-    override fun sensor(sensor: SensorType, didDetect: TargetIdentifier) {
-        // Advertisement seen, payload not read yet.
-    }
-
-    override fun sensor(sensor: SensorType, available: Boolean, didDeleteOrDetect: TargetIdentifier) {
-        // Device became reachable/unreachable.
-    }
-
-    override fun sensor(sensor: SensorType, didRead: PayloadData, fromTarget: TargetIdentifier) {
-        // Payload read over GATT, no fresh RSSI in this callback.
-        handlePayload(didRead, proximity = null, FrameOverrides.Source.READ)
-    }
-
-    override fun sensor(sensor: SensorType, didReceive: ImmediateSendData, fromTarget: TargetIdentifier) {
-        // Goodbye/hello frames. Same 16-byte payload, same pipeline.
-        handlePayload(didReceive.data, proximity = null, FrameOverrides.Source.FRAME)
-    }
-
-    override fun sensor(sensor: SensorType, didShare: List<PayloadData>, fromTarget: TargetIdentifier) {
-        // Payloads relayed by another peer. This helps with iOS background
-        // advertising limits.
-        for (payload in didShare) {
-            handlePayload(payload, proximity = null, FrameOverrides.Source.CACHED)
-        }
-    }
-
-    override fun sensor(sensor: SensorType, didMeasure: Proximity, fromTarget: TargetIdentifier) {
-        // RSSI without payload: we cannot attribute it to a peer id yet.
-    }
-
-    override fun sensor(sensor: SensorType, didVisit: Location) {
-        // Location sensing is not enabled.
-    }
-
-    override fun sensor(
-        sensor: SensorType,
-        didMeasure: Proximity,
-        fromTarget: TargetIdentifier,
-        withPayload: PayloadData,
-    ) {
-        // The workhorse callback: an RSSI reading together with the payload
-        // Herald last read from that peer, which can be up to a refresh
-        // interval old.
-        handlePayload(withPayload, didMeasure, FrameOverrides.Source.CACHED)
-    }
-
-    override fun sensor(sensor: SensorType, didUpdateState: SensorState) {
-        // Bluetooth state changes. Could be surfaced to the UI if needed.
-    }
-
     // ----- Sighting pipeline --------------------------------------------------
-
-    private fun handlePayload(
-        data: Data,
-        proximity: Proximity?,
-        source: FrameOverrides.Source,
-    ) {
-        // Ignore anything from connections that outlived a stop.
-        if (sourceMode != SourceMode.BLE) return
-        val peerId = StatusPayloadSupplier.peerIdFrom(data)
-        val status = StatusPayloadSupplier.statusFrom(data)
-        val color = StatusPayloadSupplier.colorFrom(data)
-        val deviceKind = StatusPayloadSupplier.deviceKindFrom(data)
-        val offline = StatusPayloadSupplier.isOfflineFrom(data)
-        if (peerId == null || status == null || color == null ||
-            deviceKind == null || offline == null
-        ) {
-            Log.w(TAG, "Dropping malformed payload (${data.value.size} bytes)")
-            return
-        }
-
-        // Never list ourselves. Herald's Android relay skips handing a peer
-        // its own payload by comparing bytes, so a copy that differs from the
-        // current one (an older status, an earlier offline flag) can come
-        // back to the device it describes. Herald 2.2.0 only relays to iOS
-        // peers, so on Android this is a mirror of the iOS check.
-        if (peerId == payloadSupplier?.currentPeerId()) return
-
-        // A goodbye/hello frame from this peer outvotes the copy Herald has
-        // cached for it; null means the frame already said it all.
-        val payload = frameOverrides.resolve(
-            peerId, source, FrameOverrides.Payload(status, color, deviceKind, offline),
-        ) ?: return
-
-        if (payload.offline) {
-            // Peer said goodbye, or its payload carries the offline flag.
-            emitGone(peerId)
-            return
-        }
-        handleSighting(
-            peerId, payload.status, payload.color, payload.deviceKind, proximity?.value,
-        )
-    }
+    // Herald's payload callbacks go to payloadPipeline, which calls back into
+    // handleSighting and emitGone.
 
     /** Common path for BLE and mock sightings. */
     private fun handleSighting(

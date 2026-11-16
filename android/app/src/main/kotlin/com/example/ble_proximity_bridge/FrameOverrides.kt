@@ -4,7 +4,8 @@ import android.os.SystemClock
 
 /**
  * Decides which payload to believe for a peer: the one Herald just handed
- * over, or what the peer last announced in a goodbye/hello frame.
+ * over, what the peer last announced in a goodbye/hello frame, or the newest
+ * payload seen from it.
  *
  * A frame is pushed precisely because the receiver's copy of the payload is
  * out of date, but Herald does not update that copy from a frame: it keeps
@@ -28,12 +29,25 @@ import android.os.SystemClock
  * the sender is connected to as a central, and Herald's stop() drops those
  * connections. An Android sender keeps advertising while its blocking send
  * works through its peers, so its goodbye keeps the full [ttlMillis].
+ *
+ * Payloads from protocol version 3 on also carry a revision, which the
+ * sender bumps on every change. The newest revision seen from each peer is
+ * remembered for [revisionMemoryMillis] after it was last confirmed, and a
+ * frame or read older than it is dropped: a frame delivered late, a read
+ * that a frame overtook, or a stale copy relayed by another peer. A cached
+ * payload older than it is described by the newest payload instead when
+ * that one is online. When the newest is an offline frame whose lifetime has
+ * run out, the cached payload is taken at face value: readings carrying the
+ * old copy then most likely mean the peer restarted and its hello was lost.
+ * Without revisions (older peers), only the frame rule above applies.
  */
 class FrameOverrides(
     /** How long a frame outvotes cached payloads if no fresh read ends it. */
     private val ttlMillis: Long,
     /** The same for a goodbye sent by an iPhone. */
     private val iphoneGoodbyeTtlMillis: Long,
+    /** How long a peer's newest revision is remembered once last confirmed. */
+    private val revisionMemoryMillis: Long,
     private val now: () -> Long = SystemClock::elapsedRealtime,
 ) {
     /** Where Herald got the payload it is handing over. */
@@ -54,41 +68,82 @@ class FrameOverrides(
         CACHED,
     }
 
-    /** The decoded fields of one payload. */
+    /** The decoded fields of one payload; [revision] is null before version 3. */
     data class Payload(
         val status: Int,
         val color: Int,
         val deviceKind: Int,
         val offline: Boolean,
+        val revision: Int? = null,
     )
 
-    private class Entry(val frame: Payload, val recordedAt: Long, val lifetime: Long)
+    private enum class Order { NEWER, SAME, OLDER }
 
-    private val entries = HashMap<Long, Entry>()
+    private class Frame(val payload: Payload, val recordedAt: Long, val lifetime: Long)
+
+    private class Newest(val payload: Payload, val confirmedAt: Long, val fromFrame: Boolean)
+
+    private val frames = HashMap<Long, Frame>()
+    private val newest = HashMap<Long, Newest>()
+    private var lastSweep = now()
 
     /**
      * Returns the payload to act on for this peer, or null when [payload]
      * must be ignored: a cached copy of a peer whose goodbye frame was
-     * already reported.
+     * already reported, or a payload older than one already seen.
      */
     @Synchronized
     fun resolve(peerId: Long, source: Source, payload: Payload): Payload? {
+        sweepIfDue()
+        val known = unexpiredNewest(peerId)
+        val stale = known != null &&
+            order(payload.revision, known.payload.revision) == Order.OLDER
+        if (!stale) newest[peerId] = Newest(payload, now(), source == Source.FRAME)
+
         when (source) {
-            // Newer than any frame, so the frame's job is done.
-            Source.READ -> entries.remove(peerId)
-            Source.FRAME -> entries[peerId] = Entry(payload, now(), lifetimeOf(payload))
+            Source.FRAME -> {
+                // Delivered late: the peer has sent something newer since.
+                if (stale) return null
+                frames[peerId] = Frame(payload, now(), lifetimeOf(payload))
+                return payload
+            }
+            Source.READ -> {
+                // Older than what the peer has sent since: a read a frame
+                // overtook, or a stale relayed copy. It changes nothing.
+                if (stale) return null
+                // Newer than any frame, so the frame's job is done.
+                frames.remove(peerId)
+                return payload
+            }
             Source.CACHED -> {
-                val frame = unexpiredFrame(peerId) ?: return payload
-                // After a hello, report the peer as the frame described it.
-                return if (frame.offline) null else frame
+                val frame = unexpiredFrame(peerId)
+                if (frame != null) {
+                    if (!stale && order(payload.revision, frame.payload.revision) == Order.NEWER) {
+                        // Herald holds something newer than the frame.
+                        frames.remove(peerId)
+                        return payload
+                    }
+                    // After a hello, report the peer as the frame described it.
+                    return if (frame.payload.offline) null else frame.payload
+                }
+                // Stale implies a known newest payload.
+                if (!stale) return payload
+                return when {
+                    !known.payload.offline -> known.payload
+                    // The goodbye has run out: likely a restart whose hello
+                    // never arrived, so believe the reading.
+                    known.fromFrame -> payload
+                    // A fresh read said offline; this older copy is a relay's.
+                    else -> null
+                }
             }
         }
-        return payload
     }
 
     @Synchronized
     fun clearAll() {
-        entries.clear()
+        frames.clear()
+        newest.clear()
     }
 
     private fun lifetimeOf(frame: Payload): Long =
@@ -98,12 +153,50 @@ class FrameOverrides(
             ttlMillis
         }
 
-    private fun unexpiredFrame(peerId: Long): Payload? {
-        val entry = entries[peerId] ?: return null
+    private fun unexpiredFrame(peerId: Long): Frame? {
+        val entry = frames[peerId] ?: return null
         if (now() - entry.recordedAt > entry.lifetime) {
-            entries.remove(peerId)
+            frames.remove(peerId)
             return null
         }
-        return entry.frame
+        return entry
+    }
+
+    private fun unexpiredNewest(peerId: Long): Newest? {
+        val entry = newest[peerId] ?: return null
+        if (now() - entry.confirmedAt > revisionMemoryMillis) {
+            newest.remove(peerId)
+            return null
+        }
+        return entry
+    }
+
+    /** Drops expired entries of peers that are no longer looked up. */
+    private fun sweepIfDue() {
+        val time = now()
+        if (time - lastSweep <= revisionMemoryMillis) return
+        lastSweep = time
+        frames.entries.removeAll { time - it.value.recordedAt > it.value.lifetime }
+        newest.entries.removeAll { time - it.value.confirmedAt > revisionMemoryMillis }
+    }
+
+    /**
+     * Serial-number comparison of 7-bit revisions: [a] is newer than [b] when
+     * it is 1-63 steps ahead, older when 65-127 ahead. Null when either is
+     * unknown, or when they are exactly half the range apart.
+     */
+    private fun order(a: Int?, b: Int?): Order? {
+        if (a == null || b == null) return null
+        val distance = (a - b) and StatusPayloadSupplier.REVISION_MASK
+        return when {
+            distance == 0 -> Order.SAME
+            distance < HALF_RANGE -> Order.NEWER
+            distance > HALF_RANGE -> Order.OLDER
+            else -> null
+        }
+    }
+
+    private companion object {
+        const val HALF_RANGE = (StatusPayloadSupplier.REVISION_MASK + 1) / 2
     }
 }

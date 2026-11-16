@@ -16,7 +16,7 @@ import os.log
 /// reads, so "stopped" has to be said in the protocol itself: stop flags our
 /// payload offline and sends a goodbye frame to the peers we're connected
 /// to, start sends a hello. See StatusPayloadSupplier for the frame format.
-final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler {
+final class ProximityController: NSObject, FlutterStreamHandler {
 
   static let shared = ProximityController()
 
@@ -29,8 +29,10 @@ final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler 
   private static let goodbyeFlushSeconds: Foundation.TimeInterval = 0.3
 
   /// How long a hello, or a goodbye from an Android device, outvotes the
-  /// payload Herald has cached for that peer. The next re-read replaces the
-  /// cached copy within one refresh interval; two leaves room for a slow one.
+  /// payload Herald has cached for that peer. After a hello, the next re-read
+  /// replaces the cached copy within one refresh interval; two leave room for
+  /// a slow one. A stopped Android device can't be re-read at all, so its
+  /// goodbye simply runs out.
   private static let frameOverrideSeconds = 2 * payloadRefreshSeconds
 
   /// The same for a goodbye from an iPhone, which stops advertising
@@ -38,6 +40,12 @@ final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler 
   /// that, one keep-alive notification Herald may already have scheduled
   /// (it sends them 2 s apart), and slack.
   private static let iphoneGoodbyeOverrideSeconds: Foundation.TimeInterval = 5
+
+  /// How long the newest payload revision seen from a peer is remembered
+  /// after it was last confirmed. Long enough to outlast stale relays between
+  /// our re-reads, short enough that a 7-bit revision can't wrap around
+  /// unnoticed in between.
+  private static let revisionMemorySeconds: Foundation.TimeInterval = 60
 
   private enum SourceMode {
     case idle
@@ -48,7 +56,21 @@ final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler 
   private(set) var payloadSupplier: StatusPayloadSupplier?
   let distanceEstimator = DistanceEstimator()
   private let frameOverrides = FrameOverrides(
-    ttlSeconds: frameOverrideSeconds, iphoneGoodbyeTtlSeconds: iphoneGoodbyeOverrideSeconds)
+    ttlSeconds: frameOverrideSeconds, iphoneGoodbyeTtlSeconds: iphoneGoodbyeOverrideSeconds,
+    revisionMemorySeconds: revisionMemorySeconds)
+
+  /// Herald's delegate: turns its payload callbacks into sightings. Lazy only
+  /// because the closures capture self; it is first used on the main thread
+  /// when the host is built, before Herald can call it.
+  private lazy var payloadPipeline = PayloadPipeline(
+    frameOverrides: frameOverrides,
+    isActive: { [weak self] in self?.sourceMode == .ble },
+    localPeerId: { [weak self] in self?.localPeerId },
+    onSighting: { [weak self] peerId, status, color, deviceKind, rssi in
+      self?.handleSighting(
+        peerId: peerId, status: status, color: color, deviceKind: deviceKind, rssi: rssi)
+    },
+    onGone: { [weak self] peerId in self?.emitGone(peerId: peerId) })
 
   /// The Herald host, kept for the life of the process. Only a session id
   /// change rebuilds it.
@@ -116,7 +138,8 @@ final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler 
     mockSource?.stop()
     mockSource = nil
     distanceEstimator.clear()
-    frameOverrides.clearAll()
+    // frameOverrides is kept: the host, and with it Herald's cached payloads,
+    // survives our stop/start, so the overrides still apply.
     localPeerId = peerId
 
     if mock {
@@ -143,10 +166,10 @@ final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler 
     pendingQuiesce = nil
     mockSource?.stop()
     mockSource = nil
-    // Flip the mode first so anything Herald still delivers gets ignored.
+    // Flip the mode first so anything Herald still delivers is no longer
+    // reported (PayloadPipeline still records it).
     sourceMode = .idle
     distanceEstimator.clear()
-    frameOverrides.clearAll()
     // Host may still be running even if the current source was mock/idle.
     quiesceBleHost()
     // Host and supplier stay around: the supplier serves the offline
@@ -201,12 +224,12 @@ final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler 
     BLESensorConfiguration.logLevel = .off
     BLESensorConfiguration.mobilitySensorEnabled = nil
 
-    let supplier = StatusPayloadSupplier(peerId: peerId)
-    if let previousSupplier = previousSupplier {
-      supplier.adoptStatus(from: previousSupplier)
-    }
+    let supplier = StatusPayloadSupplier.forRebuiltHost(peerId: peerId, previous: previousSupplier)
+    // A new host starts with an empty Herald cache, so overrides of the old
+    // one's cached payloads no longer apply.
+    frameOverrides.clearAll()
     let host = SensorArray(supplier)
-    host.add(delegate: self)
+    host.add(delegate: payloadPipeline)
     payloadSupplier = supplier
     sensorArray = host
     bleHostSessionId = sessionId
@@ -248,93 +271,9 @@ final class ProximityController: NSObject, SensorDelegate, FlutterStreamHandler 
     sendReady()
   }
 
-  // MARK: - Herald SensorDelegate
-  // Herald reports through overloads of sensor(). We only care about the
-  // ones that carry a payload.
-
-  func sensor(_ sensor: SensorType, didDetect: TargetIdentifier) {
-    // Advertisement seen, payload not read yet.
-  }
-
-  func sensor(_ sensor: SensorType, didRead: PayloadData, fromTarget: TargetIdentifier) {
-    // Payload read over GATT, no fresh RSSI in this callback.
-    handlePayload(didRead.data, proximity: nil, source: .read)
-  }
-
-  func sensor(_ sensor: SensorType, didReceive: Data, fromTarget: TargetIdentifier) {
-    // Goodbye/hello frames. Same 16-byte payload, same pipeline.
-    handlePayload(didReceive, proximity: nil, source: .frame)
-  }
-
-  func sensor(_ sensor: SensorType, didMeasure: Proximity, fromTarget: TargetIdentifier) {
-    // RSSI without payload: we cannot attribute it to a peer id yet.
-  }
-
-  func sensor(_ sensor: SensorType, didVisit: Location?) {
-    // Location sensing is not enabled.
-  }
-
-  func sensor(_ sensor: SensorType, didShare: [PayloadData], fromTarget: TargetIdentifier) {
-    // Payloads relayed by another peer (helps with iOS background limits).
-    for payload in didShare {
-      handlePayload(payload.data, proximity: nil, source: .cached)
-    }
-  }
-
-  func sensor(
-    _ sensor: SensorType, didMeasure: Proximity, fromTarget: TargetIdentifier,
-    withPayload: PayloadData
-  ) {
-    // The main callback: an RSSI reading together with the payload Herald
-    // last read from that peer, which can be up to a refresh interval old.
-    handlePayload(withPayload.data, proximity: didMeasure, source: .cached)
-  }
-
-  func sensor(_ sensor: SensorType, didUpdateState: SensorState) {
-    // Bluetooth state changes. Could be surfaced to the UI if wanted.
-  }
-
   // MARK: - Sighting pipeline
-
-  private func handlePayload(
-    _ data: Data, proximity: Proximity?, source: FrameOverrides.Source
-  ) {
-    // Ignore anything from connections that outlived a stop.
-    guard sourceMode == .ble else { return }
-    guard let peerId = StatusPayloadSupplier.peerId(from: data),
-      let status = StatusPayloadSupplier.status(from: data),
-      let color = StatusPayloadSupplier.color(from: data),
-      let deviceKind = StatusPayloadSupplier.deviceKind(from: data),
-      let offline = StatusPayloadSupplier.isOffline(from: data)
-    else {
-      os_log("Dropping malformed payload (%d bytes)", type: .info, data.count)
-      return
-    }
-
-    // Never list ourselves. Herald's Android relay skips handing a peer its
-    // own payload by comparing bytes, so a copy that differs from the current
-    // one (an older status, an earlier offline flag) can come back to the
-    // device it describes.
-    if peerId == localPeerId { return }
-
-    // A goodbye/hello frame from this peer outvotes the copy Herald has
-    // cached for it; nil means the frame already said it all.
-    guard
-      let payload = frameOverrides.resolve(
-        peerId: peerId, source: source,
-        payload: FrameOverrides.Payload(
-          status: status, color: color, deviceKind: deviceKind, offline: offline))
-    else { return }
-
-    if payload.offline {
-      // Peer said goodbye, or its payload carries the offline flag.
-      emitGone(peerId: peerId)
-      return
-    }
-    handleSighting(
-      peerId: peerId, status: payload.status, color: payload.color,
-      deviceKind: payload.deviceKind, rssi: proximity?.value)
-  }
+  // Herald's payload callbacks go to payloadPipeline, which calls back into
+  // handleSighting and emitGone.
 
   /// Common path for BLE and mock sightings.
   private func handleSighting(

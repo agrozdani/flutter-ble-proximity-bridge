@@ -1,7 +1,8 @@
 import Foundation
 
 /// Decides which payload to believe for a peer: the one Herald just handed
-/// over, or what the peer last announced in a goodbye/hello frame.
+/// over, what the peer last announced in a goodbye/hello frame, or the newest
+/// payload seen from it.
 ///
 /// A frame is pushed precisely because the receiver's copy of the payload is
 /// out of date, but Herald does not update that copy from a frame: it keeps
@@ -25,6 +26,17 @@ import Foundation
 /// the sender is connected to as a central, and Herald's stop() drops those
 /// connections. An Android sender keeps advertising while its blocking send
 /// works through its peers, so its goodbye keeps the full `ttlSeconds`.
+///
+/// Payloads from protocol version 3 on also carry a revision, which the
+/// sender bumps on every change. The newest revision seen from each peer is
+/// remembered for `revisionMemorySeconds` after it was last confirmed, and a
+/// frame or read older than it is dropped: a frame delivered late, a read
+/// that a frame overtook, or a stale copy relayed by another peer. A cached
+/// payload older than it is described by the newest payload instead when
+/// that one is online. When the newest is an offline frame whose lifetime has
+/// run out, the cached payload is taken at face value: readings carrying the
+/// old copy then most likely mean the peer restarted and its hello was lost.
+/// Without revisions (older peers), only the frame rule above applies.
 final class FrameOverrides {
 
   /// Where Herald got the payload it is handing over.
@@ -39,57 +51,108 @@ final class FrameOverrides {
     case cached
   }
 
-  /// The decoded fields of one payload.
+  /// The decoded fields of one payload; `revision` is nil before version 3.
   struct Payload: Equatable {
     var status: Int
     var color: Int
     var deviceKind: Int
     var offline: Bool
+    var revision: Int? = nil
+  }
+
+  private enum Order {
+    case newer, same, older
+  }
+
+  private struct Frame {
+    let payload: Payload
+    let recordedAt: Double
+    let lifetime: Double
+  }
+
+  private struct Newest {
+    let payload: Payload
+    let confirmedAt: Double
+    let fromFrame: Bool
   }
 
   private let ttlSeconds: Double
   private let iphoneGoodbyeTtlSeconds: Double
+  private let revisionMemorySeconds: Double
   private let now: () -> Double
   private let lock = NSLock()
-  private var entries: [Int: (frame: Payload, recordedAt: Double, lifetime: Double)] = [:]
+  private var frames: [Int: Frame] = [:]
+  private var newest: [Int: Newest] = [:]
+  private var lastSweep: Double
 
   /// `ttlSeconds` is how long a frame outvotes cached payloads if no fresh
   /// read ends it; `iphoneGoodbyeTtlSeconds` the same for a goodbye sent by
-  /// an iPhone. `now` is a monotonic clock in seconds; tests inject their own.
+  /// an iPhone; `revisionMemorySeconds` how long a peer's newest revision is
+  /// remembered once last confirmed. `now` is a monotonic clock in seconds;
+  /// tests inject their own.
   init(
     ttlSeconds: Double,
     iphoneGoodbyeTtlSeconds: Double,
-    now: @escaping () -> Double = { ProcessInfo.processInfo.systemUptime }
+    revisionMemorySeconds: Double,
+    now: @escaping () -> Double = MonotonicClock.seconds
   ) {
     self.ttlSeconds = ttlSeconds
     self.iphoneGoodbyeTtlSeconds = iphoneGoodbyeTtlSeconds
+    self.revisionMemorySeconds = revisionMemorySeconds
     self.now = now
+    self.lastSweep = now()
   }
 
   /// Returns the payload to act on for this peer, or nil when `payload` must
   /// be ignored: a cached copy of a peer whose goodbye frame was already
-  /// reported.
+  /// reported, or a payload older than one already seen.
   func resolve(peerId: Int, source: Source, payload: Payload) -> Payload? {
     lock.lock()
     defer { lock.unlock() }
-    switch source {
-    case .read:
-      // Newer than any frame, so the frame's job is done.
-      entries.removeValue(forKey: peerId)
-    case .frame:
-      entries[peerId] = (payload, now(), lifetime(of: payload))
-    case .cached:
-      guard let frame = unexpiredFrame(peerId: peerId) else { return payload }
-      // After a hello, report the peer as the frame described it.
-      return frame.offline ? nil : frame
+    sweepIfDue()
+    let known = unexpiredNewest(peerId: peerId)
+    let stale = known.map { order(payload.revision, $0.payload.revision) == .older } ?? false
+    if !stale {
+      newest[peerId] = Newest(payload: payload, confirmedAt: now(), fromFrame: source == .frame)
     }
-    return payload
+
+    switch source {
+    case .frame:
+      // Delivered late: the peer has sent something newer since.
+      if stale { return nil }
+      frames[peerId] = Frame(payload: payload, recordedAt: now(), lifetime: lifetime(of: payload))
+      return payload
+    case .read:
+      // Older than what the peer has sent since: a read a frame overtook,
+      // or a stale relayed copy. It changes nothing.
+      if stale { return nil }
+      // Newer than any frame, so the frame's job is done.
+      frames.removeValue(forKey: peerId)
+      return payload
+    case .cached:
+      if let frame = unexpiredFrame(peerId: peerId) {
+        if !stale, order(payload.revision, frame.payload.revision) == .newer {
+          // Herald holds something newer than the frame.
+          frames.removeValue(forKey: peerId)
+          return payload
+        }
+        // After a hello, report the peer as the frame described it.
+        return frame.payload.offline ? nil : frame.payload
+      }
+      guard stale, let known = known else { return payload }
+      if !known.payload.offline { return known.payload }
+      // The goodbye has run out: likely a restart whose hello never arrived,
+      // so believe the reading. Otherwise a fresh read said offline, and
+      // this older copy is a relay's.
+      return known.fromFrame ? payload : nil
+    }
   }
 
   func clearAll() {
     lock.lock()
     defer { lock.unlock() }
-    entries.removeAll()
+    frames.removeAll()
+    newest.removeAll()
   }
 
   private func lifetime(of frame: Payload) -> Double {
@@ -98,12 +161,45 @@ final class FrameOverrides {
   }
 
   /// Call with the lock held.
-  private func unexpiredFrame(peerId: Int) -> Payload? {
-    guard let entry = entries[peerId] else { return nil }
+  private func unexpiredFrame(peerId: Int) -> Frame? {
+    guard let entry = frames[peerId] else { return nil }
     if now() - entry.recordedAt > entry.lifetime {
-      entries.removeValue(forKey: peerId)
+      frames.removeValue(forKey: peerId)
       return nil
     }
-    return entry.frame
+    return entry
+  }
+
+  /// Call with the lock held.
+  private func unexpiredNewest(peerId: Int) -> Newest? {
+    guard let entry = newest[peerId] else { return nil }
+    if now() - entry.confirmedAt > revisionMemorySeconds {
+      newest.removeValue(forKey: peerId)
+      return nil
+    }
+    return entry
+  }
+
+  /// Drops expired entries of peers that are no longer looked up. Call with
+  /// the lock held.
+  private func sweepIfDue() {
+    let time = now()
+    guard time - lastSweep > revisionMemorySeconds else { return }
+    lastSweep = time
+    frames = frames.filter { time - $0.value.recordedAt <= $0.value.lifetime }
+    newest = newest.filter { time - $0.value.confirmedAt <= revisionMemorySeconds }
+  }
+
+  /// Serial-number comparison of 7-bit revisions: `a` is newer than `b` when
+  /// it is 1-63 steps ahead, older when 65-127 ahead. Nil when either is
+  /// unknown, or when they are exactly half the range apart.
+  private func order(_ a: Int?, _ b: Int?) -> Order? {
+    guard let a = a, let b = b else { return nil }
+    let distance = (a - b) & StatusPayloadSupplier.revisionMask
+    let half = (StatusPayloadSupplier.revisionMask + 1) / 2
+    if distance == 0 { return .same }
+    if distance < half { return .newer }
+    if distance > half { return .older }
+    return nil
   }
 }
