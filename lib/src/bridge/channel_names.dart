@@ -50,3 +50,40 @@ abstract final class BridgeEventKeys {
   static const String rssi = 'rssi';
   static const String distance = 'distance';
 }
+
+/// Diagnostics channels: the native logger's side of the logging system
+/// (docs/logging.md). Separate from the bridge channels above, which they
+/// never affect.
+abstract final class LogChannels {
+  /// Dart → native: [LogMethods].
+  static const String methods = 'ble_proximity_bridge/log';
+
+  /// Native → Dart: batches (`List<String>`) of formatted native log lines.
+  static const String events = 'ble_proximity_bridge/logs';
+}
+
+/// Methods on [LogChannels.methods].
+abstract final class LogMethods {
+  /// Sets the native log level and Herald's own log level; returns a map
+  /// with the log file path ([LogArgs.file]).
+  static const String configure = 'configure';
+
+  /// Appends formatted Dart lines ([LogArgs.lines]) to the native log file.
+  static const String write = 'write';
+}
+
+/// Argument and result keys for [LogMethods].
+abstract final class LogArgs {
+  /// `debug`, `info`, `warn` or `error`.
+  static const String level = 'level';
+
+  /// Herald's level: `off`, `fault`, `info` or `debug`.
+  static const String herald = 'herald';
+
+  static const String lines = 'lines';
+  static const String file = 'file';
+
+  /// In the `configure` result: true when native lines do not reach the
+  /// `flutter run` console on their own (iOS simulator), so Dart prints them.
+  static const String echo = 'echo';
+}

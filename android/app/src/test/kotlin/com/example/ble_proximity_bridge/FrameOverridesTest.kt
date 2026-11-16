@@ -2,6 +2,7 @@ package com.example.ble_proximity_bridge
 
 import com.example.ble_proximity_bridge.FrameOverrides.Payload
 import com.example.ble_proximity_bridge.FrameOverrides.Source
+import com.example.ble_proximity_bridge.FrameOverrides.Verdict
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNull
 import org.junit.Test
@@ -316,5 +317,77 @@ class FrameOverridesTest {
 
         overrides.clearAll()
         assertEquals(rev(9, offline = true), overrides.resolve(7, Source.FRAME, rev(9, offline = true)))
+    }
+
+    // ----- Verdicts (what PayloadPipeline logs) -----------------------------
+
+    private fun verdict(peerId: Long, source: Source, payload: Payload) =
+        overrides.resolveExplained(peerId, source, payload).verdict
+
+    @Test
+    fun `each decision reports why it was made`() {
+        assertEquals(Verdict.CACHED_ACCEPTED, verdict(7, Source.CACHED, rev(5)))
+        assertEquals(Verdict.READ_ACCEPTED, verdict(7, Source.READ, rev(5)))
+        assertEquals(Verdict.FRAME_RECORDED, verdict(7, Source.FRAME, rev(6, offline = true)))
+        assertEquals(Verdict.CACHED_HIDDEN_BY_GOODBYE, verdict(7, Source.CACHED, rev(5)))
+        assertEquals(Verdict.FRAME_LATE, verdict(7, Source.FRAME, rev(4)))
+        assertEquals(Verdict.READ_STALE, verdict(7, Source.READ, rev(5)))
+        assertEquals(Verdict.READ_ENDS_FRAME, verdict(7, Source.READ, rev(7)))
+        assertEquals(Verdict.FRAME_RECORDED, verdict(7, Source.FRAME, rev(8)))
+        assertEquals(Verdict.CACHED_REPLACED_BY_HELLO, verdict(7, Source.CACHED, rev(7, offline = true)))
+        assertEquals(Verdict.CACHED_NEWER_THAN_FRAME, verdict(7, Source.CACHED, rev(9)))
+
+        overrides.resolve(8, Source.READ, rev(10))
+        assertEquals(Verdict.CACHED_REPLACED_BY_NEWEST, verdict(8, Source.CACHED, rev(9)))
+
+        overrides.resolve(9, Source.READ, rev(10, offline = true))
+        assertEquals(Verdict.CACHED_DROPPED_AFTER_OFFLINE_READ, verdict(9, Source.CACHED, rev(9)))
+
+        overrides.resolve(10, Source.FRAME, iphoneRev(10, offline = true))
+        clock = 5_001L
+        assertEquals(Verdict.CACHED_BELIEVED_AFTER_GOODBYE, verdict(10, Source.CACHED, iphoneRev(9)))
+    }
+
+    @Test
+    fun `verdicts are named in the stats line as on iOS`() {
+        assertEquals("cachedAccepted", Verdict.CACHED_ACCEPTED.key)
+        assertEquals("cachedDroppedAfterOfflineRead", Verdict.CACHED_DROPPED_AFTER_OFFLINE_READ.key)
+        assertEquals("frameLate", Verdict.FRAME_LATE.key)
+    }
+
+    @Test
+    fun `the explanation says what the payload was weighed against`() {
+        assertEquals(
+            "nothing remembered",
+            overrides.resolveExplained(7, Source.FRAME, rev(3, offline = true)).context,
+        )
+
+        clock = 2_000L
+        assertEquals(
+            "newest rev=3 offline (frame 2.0s ago) | frame goodbye rev=3 (28.0s left)",
+            overrides.resolveExplained(7, Source.CACHED, rev(2)).context,
+        )
+    }
+
+    @Test
+    fun `the snapshot lists what is remembered without changing it`() {
+        overrides.resolve(7, Source.FRAME, iphoneRev(3, offline = true))
+        overrides.resolve(8, Source.READ, rev(4))
+
+        clock = 6_000L
+        // Peer 7's goodbye has run out, its revision is still remembered.
+        assertEquals(
+            mapOf(
+                7L to "newest rev=3 offline (frame 6.0s ago)",
+                8L to "newest rev=4 online (read 6.0s ago)",
+            ),
+            overrides.snapshot(),
+        )
+        assertEquals(2, overrides.trackedPeerCount())
+
+        clock = 61_000L
+        assertEquals(emptyMap<Long, String>(), overrides.snapshot())
+        // Logging never drops entries; only lookups and the sweep do.
+        assertEquals(2, overrides.trackedPeerCount())
     }
 }

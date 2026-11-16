@@ -69,6 +69,38 @@ final class FrameOverrides {
     var revision: Int? = nil
   }
 
+  /// Why `resolveExplained` decided what it did; logged by the pipeline.
+  enum Verdict {
+    case frameRecorded, frameLate
+    case readAccepted, readEndsFrame, readStale
+    case cachedAccepted, cachedNewerThanFrame, cachedHiddenByGoodbye, cachedReplacedByHello
+    case cachedReplacedByNewest, cachedBelievedAfterGoodbye, cachedDroppedAfterOfflineRead
+
+    var description: String {
+      switch self {
+      case .frameRecorded: return "frame recorded"
+      case .frameLate, .readStale: return "dropped: older than the newest revision"
+      case .readAccepted, .cachedAccepted: return "accepted"
+      case .readEndsFrame: return "accepted; ends the frame's override"
+      case .cachedNewerThanFrame: return "accepted: newer than the frame, which it ends"
+      case .cachedHiddenByGoodbye: return "ignored: the peer's goodbye frame outvotes it"
+      case .cachedReplacedByHello: return "replaced by the peer's hello frame"
+      case .cachedReplacedByNewest: return "replaced by the newest payload (it is older)"
+      case .cachedBelievedAfterGoodbye:
+        return "accepted: older, but the goodbye ran out (likely a restart whose hello was lost)"
+      case .cachedDroppedAfterOfflineRead: return "ignored: older than a read that said offline"
+      }
+    }
+  }
+
+  /// What `resolveExplained` returns: the payload to act on (nil: ignore
+  /// it), why, and what it was weighed against, for the log.
+  struct Resolution {
+    let payload: Payload?
+    let verdict: Verdict
+    let context: String
+  }
+
   private enum Order {
     case newer, same, older
   }
@@ -116,11 +148,21 @@ final class FrameOverrides {
   /// be ignored: a cached copy of a peer whose goodbye frame was already
   /// reported, or a payload older than one already seen.
   func resolve(peerId: Int, source: Source, payload: Payload) -> Payload? {
+    resolveExplained(peerId: peerId, source: source, payload: payload).payload
+  }
+
+  /// `resolve`, plus why.
+  func resolveExplained(peerId: Int, source: Source, payload: Payload) -> Resolution {
     lock.lock()
     defer { lock.unlock() }
     sweepIfDue()
     let known = unexpiredNewest(peerId: peerId)
     let stale = known.map { order(payload.revision, $0.payload.revision) == .older } ?? false
+    // What this payload is weighed against, before anything changes.
+    let context = describe(known, peekFrame(peerId: peerId))
+    func result(_ payload: Payload?, _ verdict: Verdict) -> Resolution {
+      Resolution(payload: payload, verdict: verdict, context: context)
+    }
     // Only what the peer sent us itself is remembered (see above).
     if !stale, source != .cached {
       newest[peerId] = Newest(payload: payload, confirmedAt: now(), fromFrame: source == .frame)
@@ -129,16 +171,17 @@ final class FrameOverrides {
     switch source {
     case .frame:
       // Delivered late: the peer has sent something newer since.
-      if stale { return nil }
+      if stale { return result(nil, .frameLate) }
       frames[peerId] = Frame(payload: payload, recordedAt: now(), lifetime: lifetime(of: payload))
-      return payload
+      return result(payload, .frameRecorded)
     case .read:
       // Older than what the peer has sent since: a read a frame overtook,
       // or a stale relayed copy. It changes nothing.
-      if stale { return nil }
+      if stale { return result(nil, .readStale) }
       // Newer than any frame, so the frame's job is done.
+      let hadFrame = peekFrame(peerId: peerId) != nil
       frames.removeValue(forKey: peerId)
-      return payload
+      return result(payload, hadFrame ? .readEndsFrame : .readAccepted)
     case .cached:
       if let frame = unexpiredFrame(peerId: peerId) {
         // A later frame replaces this one and a later read ends it, so the
@@ -147,18 +190,33 @@ final class FrameOverrides {
         if order(payload.revision, frame.payload.revision) == .newer {
           // Herald holds something newer than the frame.
           frames.removeValue(forKey: peerId)
-          return payload
+          return result(payload, .cachedNewerThanFrame)
         }
         // After a hello, report the peer as the frame described it.
-        return frame.payload.offline ? nil : frame.payload
+        return frame.payload.offline
+          ? result(nil, .cachedHiddenByGoodbye) : result(frame.payload, .cachedReplacedByHello)
       }
-      guard stale, let known = known else { return payload }
-      if !known.payload.offline { return known.payload }
+      guard stale, let known = known else { return result(payload, .cachedAccepted) }
+      if !known.payload.offline { return result(known.payload, .cachedReplacedByNewest) }
       // The goodbye has run out: likely a restart whose hello never arrived,
       // so believe the reading. Otherwise a fresh read said offline, and
       // this older copy is a relay's.
-      return known.fromFrame ? payload : nil
+      return known.fromFrame
+        ? result(payload, .cachedBelievedAfterGoodbye) : result(nil, .cachedDroppedAfterOfflineRead)
     }
+  }
+
+  /// What is remembered for each peer that still has an unexpired entry,
+  /// for the periodic stats line.
+  func snapshot() -> [Int: String] {
+    lock.lock()
+    defer { lock.unlock() }
+    var result: [Int: String] = [:]
+    for peerId in Set(frames.keys).union(newest.keys) {
+      let text = describe(peekNewest(peerId: peerId), peekFrame(peerId: peerId))
+      if text != Self.nothingRemembered { result[peerId] = text }
+    }
+    return result
   }
 
   func clearAll() {
@@ -173,6 +231,45 @@ final class FrameOverrides {
     lock.lock()
     defer { lock.unlock() }
     return Set(frames.keys).union(newest.keys).count
+  }
+
+  private static let nothingRemembered = "nothing remembered"
+
+  /// E.g. `newest rev=17 online (read 3.2s ago) | frame goodbye rev=18 (1.8s
+  /// left)`. Call with the lock held.
+  private func describe(_ known: Newest?, _ frame: Frame?) -> String {
+    if known == nil && frame == nil { return Self.nothingRemembered }
+    let time = now()
+    var parts: [String] = []
+    if let known = known {
+      parts.append(
+        "newest rev=\(known.payload.revision.map(String.init) ?? "-") "
+          + "\(known.payload.offline ? "offline" : "online") "
+          + "(\(known.fromFrame ? "frame" : "read") \(Self.seconds(time - known.confirmedAt)) ago)")
+    }
+    if let frame = frame {
+      parts.append(
+        "frame \(frame.payload.offline ? "goodbye" : "hello") "
+          + "rev=\(frame.payload.revision.map(String.init) ?? "-") "
+          + "(\(Self.seconds(frame.lifetime - (time - frame.recordedAt))) left)")
+    }
+    return parts.joined(separator: " | ")
+  }
+
+  private static func seconds(_ value: Double) -> String { String(format: "%.1fs", value) }
+
+  // Lookups for the log: like the two below, but they leave expired entries
+  // in place, so logging never changes the state. Call with the lock held.
+  private func peekFrame(peerId: Int) -> Frame? {
+    guard let entry = frames[peerId], now() - entry.recordedAt <= entry.lifetime else { return nil }
+    return entry
+  }
+
+  private func peekNewest(peerId: Int) -> Newest? {
+    guard let entry = newest[peerId], now() - entry.confirmedAt <= revisionMemorySeconds else {
+      return nil
+    }
+    return entry
   }
 
   private func lifetime(of frame: Payload) -> Double {

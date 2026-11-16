@@ -197,6 +197,16 @@ class StatusPayloadSupplierTests: XCTestCase {
     XCTAssertNil(StatusPayloadSupplier.isOffline(from: data))
     XCTAssertNil(StatusPayloadSupplier.revision(from: data))
   }
+
+  func testPayloadsAreDescribedForTheLogTheSameWayAsOnAndroid() {
+    XCTAssertEqual(
+      StatusPayloadSupplier.describe(Data(androidOnline)), "51C0FFEE android st=2 col=5 rev=2 online v3")
+    XCTAssertEqual(
+      StatusPayloadSupplier.describe(Data(iosOffline)), "51C0FFEE ios st=2 col=5 rev=3 OFFLINE v3")
+    XCTAssertEqual(StatusPayloadSupplier.describe(Data(count: 15)), "(malformed)")
+    XCTAssertEqual(peerHex(-1), "FFFFFFFFFFFFFFFF")
+    XCTAssertEqual(peerHex(0x0B5E_AFE7), "0B5EAFE7")
+  }
 }
 
 /// Same cases as FrameOverridesTest.kt on Android.
@@ -514,6 +524,68 @@ class FrameOverridesTests: XCTestCase {
     XCTAssertEqual(
       overrides.resolve(peerId: 7, source: .frame, payload: rev(9, offline: true)),
       rev(9, offline: true))
+  }
+
+  // MARK: - Verdicts (what PayloadPipeline logs)
+
+  private func verdict(
+    _ peerId: Int, _ source: FrameOverrides.Source, _ payload: FrameOverrides.Payload
+  ) -> FrameOverrides.Verdict {
+    overrides.resolveExplained(peerId: peerId, source: source, payload: payload).verdict
+  }
+
+  func testEachDecisionReportsWhyItWasMade() {
+    XCTAssertEqual(verdict(7, .cached, rev(5)), .cachedAccepted)
+    XCTAssertEqual(verdict(7, .read, rev(5)), .readAccepted)
+    XCTAssertEqual(verdict(7, .frame, rev(6, offline: true)), .frameRecorded)
+    XCTAssertEqual(verdict(7, .cached, rev(5)), .cachedHiddenByGoodbye)
+    XCTAssertEqual(verdict(7, .frame, rev(4)), .frameLate)
+    XCTAssertEqual(verdict(7, .read, rev(5)), .readStale)
+    XCTAssertEqual(verdict(7, .read, rev(7)), .readEndsFrame)
+    XCTAssertEqual(verdict(7, .frame, rev(8)), .frameRecorded)
+    XCTAssertEqual(verdict(7, .cached, rev(7, offline: true)), .cachedReplacedByHello)
+    XCTAssertEqual(verdict(7, .cached, rev(9)), .cachedNewerThanFrame)
+
+    _ = overrides.resolve(peerId: 8, source: .read, payload: rev(10))
+    XCTAssertEqual(verdict(8, .cached, rev(9)), .cachedReplacedByNewest)
+
+    _ = overrides.resolve(peerId: 9, source: .read, payload: rev(10, offline: true))
+    XCTAssertEqual(verdict(9, .cached, rev(9)), .cachedDroppedAfterOfflineRead)
+
+    _ = overrides.resolve(peerId: 10, source: .frame, payload: iphoneRev(10, offline: true))
+    clock = 5.001
+    XCTAssertEqual(verdict(10, .cached, iphoneRev(9)), .cachedBelievedAfterGoodbye)
+  }
+
+  func testTheExplanationSaysWhatThePayloadWasWeighedAgainst() {
+    XCTAssertEqual(
+      overrides.resolveExplained(peerId: 7, source: .frame, payload: rev(3, offline: true)).context,
+      "nothing remembered")
+
+    clock = 2
+    XCTAssertEqual(
+      overrides.resolveExplained(peerId: 7, source: .cached, payload: rev(2)).context,
+      "newest rev=3 offline (frame 2.0s ago) | frame goodbye rev=3 (28.0s left)")
+  }
+
+  func testTheSnapshotListsWhatIsRememberedWithoutChangingIt() {
+    _ = overrides.resolve(peerId: 7, source: .frame, payload: iphoneRev(3, offline: true))
+    _ = overrides.resolve(peerId: 8, source: .read, payload: rev(4))
+
+    clock = 6
+    // Peer 7's goodbye has run out, its revision is still remembered.
+    XCTAssertEqual(
+      overrides.snapshot(),
+      [
+        7: "newest rev=3 offline (frame 6.0s ago)",
+        8: "newest rev=4 online (read 6.0s ago)",
+      ])
+    XCTAssertEqual(overrides.trackedPeerCount(), 2)
+
+    clock = 61
+    XCTAssertEqual(overrides.snapshot(), [:])
+    // Logging never drops entries; only lookups and the sweep do.
+    XCTAssertEqual(overrides.trackedPeerCount(), 2)
   }
 }
 

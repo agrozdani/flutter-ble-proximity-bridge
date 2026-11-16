@@ -12,6 +12,19 @@ import android.os.SystemClock
  */
 class DistanceEstimator {
 
+    /** One estimate and what it was computed from, for the log. */
+    data class Estimate(
+        val distance: Double,
+        val median: Double,
+        val smoothed: Double,
+        val samples: Int,
+        /** True when the sender's iPhone cutoffs were used. */
+        val iosCutoffs: Boolean,
+    )
+
+    /** A peer's model as of its last sample, for the periodic stats line. */
+    data class Snapshot(val peerId: Long, val last: Estimate, val lastSampleAgeMillis: Long)
+
     private val models = HashMap<Long, PeerModel>()
 
     @Synchronized
@@ -24,11 +37,24 @@ class DistanceEstimator {
      * sample on), or null for a NaN sample. One synchronized operation so BLE
      * callbacks cannot interleave.
      */
+    fun addSample(peerId: Long, rssi: Double, senderDeviceKind: Int): Double? =
+        addSampleDetailed(peerId, rssi, senderDeviceKind)?.distance
+
+    /** [addSample], with the median and smoothed RSSI behind the estimate. */
     @Synchronized
-    fun addSample(peerId: Long, rssi: Double, senderDeviceKind: Int): Double? {
+    fun addSampleDetailed(peerId: Long, rssi: Double, senderDeviceKind: Int): Estimate? {
         if (rssi.isNaN()) return null
         val model = models.getOrPut(peerId) { PeerModel(senderDeviceKind) }
         return model.addAndEstimate(rssi)
+    }
+
+    @Synchronized
+    fun snapshot(): List<Snapshot> {
+        val now = SystemClock.elapsedRealtime()
+        return models.mapNotNull { (peerId, model) ->
+            val last = model.last ?: return@mapNotNull null
+            Snapshot(peerId, last, now - model.lastSampleAt)
+        }
     }
 
     /** Frees the model for a peer that left. */
@@ -50,9 +76,15 @@ class DistanceEstimator {
             private val BUCKETS_METERS = doubleArrayOf(0.5, 1.5, 3.5, 8.0)
         }
 
+        private val iosCutoffs = senderDeviceKind == 0
         private val cutoffs =
-            if (senderDeviceKind == 0) RSSI_CUTOFFS_IOS_SENDER
+            if (iosCutoffs) RSSI_CUTOFFS_IOS_SENDER
             else RSSI_CUTOFFS_ANDROID_SENDER
+
+        var last: Estimate? = null
+            private set
+        var lastSampleAt = 0L
+            private set
 
         // (elapsedRealtime ms, rssi) pairs. elapsedRealtime is monotonic,
         // so clock changes cannot break the window.
@@ -63,7 +95,7 @@ class DistanceEstimator {
             processNoise = 0.05,
         )
 
-        fun addAndEstimate(rssi: Double): Double? {
+        fun addAndEstimate(rssi: Double): Estimate? {
             val now = SystemClock.elapsedRealtime()
             window.addLast(now to rssi)
             while (window.size > MAX_SAMPLES) window.removeFirst()
@@ -75,10 +107,17 @@ class DistanceEstimator {
             val median = medianOf(window.map { it.second })
             val smoothed = kalman.update(median)
 
+            var distance = BUCKETS_METERS.last()
             for (i in cutoffs.indices) {
-                if (smoothed > cutoffs[i]) return BUCKETS_METERS[i]
+                if (smoothed > cutoffs[i]) {
+                    distance = BUCKETS_METERS[i]
+                    break
+                }
             }
-            return BUCKETS_METERS.last()
+            return Estimate(distance, median, smoothed, window.size, iosCutoffs).also {
+                last = it
+                lastSampleAt = now
+            }
         }
 
         private fun medianOf(values: List<Double>): Double {

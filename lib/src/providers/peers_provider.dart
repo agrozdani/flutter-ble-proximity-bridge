@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../logging/log.dart';
 import '../models/bridge_event.dart';
 import '../models/peer.dart';
 import 'channel_providers.dart';
@@ -56,20 +57,19 @@ class PeersController extends Notifier<Map<int, Peer>> {
     }
     _lastEmitted[sighting.id] = now;
 
-    state = {
-      ...state,
-      sighting.id: Peer(
-        id: sighting.id,
-        status: status,
-        colorIndex: sighting.colorIndex,
-        deviceKind: sighting.deviceKind,
-        // Keep the old measurement if this sighting didn't carry one.
-        rssi: sighting.rssi ?? existing?.rssi,
-        distance: sighting.distance ?? existing?.distance,
-        firstSeen: existing?.firstSeen ?? now,
-        lastSeen: now,
-      ),
-    };
+    final peer = Peer(
+      id: sighting.id,
+      status: status,
+      colorIndex: sighting.colorIndex,
+      deviceKind: sighting.deviceKind,
+      // Keep the old measurement if this sighting didn't carry one.
+      rssi: sighting.rssi ?? existing?.rssi,
+      distance: sighting.distance ?? existing?.distance,
+      firstSeen: existing?.firstSeen ?? now,
+      lastSeen: now,
+    );
+    _logChange(existing, peer);
+    state = {...state, sighting.id: peer};
   }
 
   /// The peer said goodbye, so drop it right away instead of waiting for
@@ -77,16 +77,67 @@ class PeersController extends Notifier<Map<int, Peer>> {
   void removeNow(int peerId) {
     _lastSeen.remove(peerId);
     _lastEmitted.remove(peerId);
-    if (!state.containsKey(peerId)) return;
+    final peer = state[peerId];
+    if (peer == null) {
+      Log.d('peers', 'goodbye from ${peerHex(peerId)}, which is not listed');
+      return;
+    }
+    Log.i(
+      'peers',
+      '- ${peerHex(peerId)} removed: goodbye (listed for '
+          '${_seconds(DateTime.now().difference(peer.firstSeen))})',
+    );
     state = {...state}..remove(peerId);
-    unawaited(ref.read(methodChannelProvider).forgetPeer(peerId));
+    _forget(peerId);
   }
 
   void clear() {
+    if (state.isNotEmpty) Log.i('peers', 'cleared ${state.length} peer(s)');
     _lastSeen.clear();
     _lastEmitted.clear();
     state = const {};
   }
+
+  /// One line per change a user would see: a new peer, a new status, color
+  /// or device kind, or a new distance bucket. Plain RSSI updates are not
+  /// logged here (native.emit has every sample).
+  void _logChange(Peer? before, Peer after) {
+    final id = peerHex(after.id);
+    if (before == null) {
+      final rssi = after.rssi == null ? '' : ' ${after.rssi!.round()}dBm';
+      Log.i(
+        'peers',
+        '+ $id appeared: ${after.status.name} color=${after.colorIndex} '
+            '${after.deviceKind.name} ${after.distanceLabel}$rssi',
+      );
+      return;
+    }
+    final changes = [
+      if (before.status != after.status)
+        'status ${before.status.name}→${after.status.name}',
+      if (before.colorIndex != after.colorIndex)
+        'color ${before.colorIndex}→${after.colorIndex}',
+      if (before.deviceKind != after.deviceKind)
+        'device ${before.deviceKind.name}→${after.deviceKind.name}',
+      if (before.distanceLabel != after.distanceLabel)
+        'distance ${before.distanceLabel}→${after.distanceLabel}'
+            '${after.rssi == null ? '' : ' (${after.rssi!.round()}dBm)'}',
+    ];
+    if (changes.isNotEmpty) Log.i('peers', '~ $id ${changes.join(', ')}');
+  }
+
+  void _forget(int peerId) {
+    unawaited(
+      ref.read(methodChannelProvider).forgetPeer(peerId).catchError((
+        Object error,
+      ) {
+        Log.w('peers', 'forgetPeer ${peerHex(peerId)} failed', error);
+      }),
+    );
+  }
+
+  static String _seconds(Duration duration) =>
+      '${(duration.inMilliseconds / 1000).toStringAsFixed(1)}s';
 
   void _evictStale() {
     final cutoff = DateTime.now().subtract(_staleAfter);
@@ -96,13 +147,20 @@ class PeersController extends Notifier<Map<int, Peer>> {
         .toList();
     if (stale.isEmpty) return;
 
+    final now = DateTime.now();
     final next = {...state};
     for (final id in stale) {
+      Log.i(
+        'peers',
+        '- ${peerHex(id)} evicted: silent for '
+            '${_seconds(now.difference(_lastSeen[id]!))} '
+            '(limit ${_staleAfter.inSeconds}s)',
+      );
       next.remove(id);
       _lastSeen.remove(id);
       _lastEmitted.remove(id);
       // Tell the native side too so it can free the distance model.
-      unawaited(ref.read(methodChannelProvider).forgetPeer(id));
+      _forget(id);
     }
     state = next;
   }

@@ -1,4 +1,5 @@
 import Flutter
+import Herald
 import UIKit
 
 /// Registers the platform channels and dispatches method calls. The channel
@@ -22,11 +23,25 @@ import UIKit
   private let statusArg = "status"
   private let colorArg = "color"
 
+  // Diagnostics: see docs/logging.md and LogChannels in Dart.
+  private let logMethodChannelName = "ble_proximity_bridge/log"
+  private let logEventChannelName = "ble_proximity_bridge/logs"
+  private let logConfigureMethod = "configure"
+  private let logWriteMethod = "write"
+  private let logLevelArg = "level"
+  private let logHeraldArg = "herald"
+  private let logLinesArg = "lines"
+  private let logFileKey = "file"
+  private let logEchoKey = "echo"
+
   // MARK: - Engine setup
 
   func didInitializeImplicitFlutterEngine(_ engineBridge: FlutterImplicitEngineBridge) {
+    // The first log call opens the log file and writes its header.
+    BridgeLog.i("app", "Flutter engine initialized; registering channels")
     GeneratedPluginRegistrant.register(with: engineBridge.pluginRegistry)
     setupBridgeChannels(messenger: engineBridge.applicationRegistrar.messenger())
+    setupLogChannels(messenger: engineBridge.applicationRegistrar.messenger())
   }
 
   // MARK: - Channel setup
@@ -61,20 +76,64 @@ import UIKit
     }
   }
 
+  private func setupLogChannels(messenger: FlutterBinaryMessenger) {
+    FlutterEventChannel(name: logEventChannelName, binaryMessenger: messenger)
+      .setStreamHandler(LogStreamHandler())
+
+    let methods = FlutterMethodChannel(name: logMethodChannelName, binaryMessenger: messenger)
+    methods.setMethodCallHandler { [weak self] call, result in
+      guard let self = self else {
+        result(nil)
+        return
+      }
+      let args = call.arguments as? [String: Any]
+      switch call.method {
+      case self.logWriteMethod:
+        BridgeLog.writeFromDart(args?[self.logLinesArg] as? [String] ?? [])
+        result(nil)
+      case self.logConfigureMethod:
+        let herald = (args?[self.logHeraldArg] as? String).flatMap(SensorLoggerLevel.init(rawValue:))
+        BridgeLog.configure(
+          level: BridgeLog.Level(name: args?[self.logLevelArg] as? String), herald: herald)
+        result([
+          self.logFileKey: BridgeLog.shared.currentFile?.path as Any,
+          self.logEchoKey: BridgeLog.dartShouldEcho,
+        ])
+      default:
+        result(FlutterMethodNotImplemented)
+      }
+    }
+  }
+
   // MARK: - Method handlers
 
+  private func reject(
+    _ result: FlutterResult, _ method: String, code: String, message: String
+  ) {
+    BridgeLog.w("method", "\(method) rejected: \(code): \(message)")
+    result(FlutterError(code: code, message: message, details: nil))
+  }
+
   private func handleStart(call: FlutterMethodCall, result: @escaping FlutterResult) {
+    let described = (call.arguments as? [String: Any]).map { args in
+      "start session=\(args[sessionIdArg] ?? "nil") "
+        + "self=\((args[peerIdArg] as? Int).map(peerHex) ?? "nil") "
+        + "mock=\((args[mockArg] as? Bool).map(String.init) ?? "nil")"
+    }
+    BridgeLog.i("method", described ?? "start without arguments")
     guard let args = call.arguments as? [String: Any],
       let sessionId = args[sessionIdArg] as? String,
       let peerId = args[peerIdArg] as? Int
     else {
-      result(FlutterError(code: "bad_args", message: "start requires sessionId and peerId", details: nil))
+      reject(result, "start", code: "bad_args", message: "start requires sessionId and peerId")
       return
     }
     // Validate here, matching Android: the session id becomes the BLE service
     // UUID (CBUUID(string:) raises on malformed input).
     guard UUID(uuidString: sessionId) != nil, peerId >= 0 else {
-      result(FlutterError(code: "bad_args", message: "sessionId must be a UUID string and peerId non-negative", details: nil))
+      reject(
+        result, "start", code: "bad_args",
+        message: "sessionId must be a UUID string and peerId non-negative")
       return
     }
     let mock = args[mockArg] as? Bool ?? false
@@ -84,6 +143,7 @@ import UIKit
   }
 
   private func handleStop(result: @escaping FlutterResult) {
+    BridgeLog.i("method", "stop (running=\(ProximityController.shared.isRunning))")
     // Stopping while not running is fine; Dart calls stop defensively.
     ProximityController.shared.stop()
     result(nil)
@@ -94,7 +154,7 @@ import UIKit
       let status = args[statusArg] as? Int,
       let color = args[colorArg] as? Int
     else {
-      result(FlutterError(code: "bad_args", message: "updateStatus requires status and color", details: nil))
+      reject(result, "updateStatus", code: "bad_args", message: "updateStatus requires status and color")
       return
     }
     // Gate on isRunning, not just on the supplier: the supplier stays warm
@@ -102,9 +162,10 @@ import UIKit
     // but updateStatus is only valid while a source runs.
     let controller = ProximityController.shared
     guard controller.isRunning, let supplier = controller.payloadSupplier else {
-      result(FlutterError(code: "not_running", message: "updateStatus requires a running bridge", details: nil))
+      reject(result, "updateStatus", code: "not_running", message: "updateStatus requires a running bridge")
       return
     }
+    BridgeLog.i("method", "updateStatus status=\(status) color=\(color)")
     supplier.update(status: status, color: color)
     result(nil)
   }
@@ -113,10 +174,27 @@ import UIKit
     guard let args = call.arguments as? [String: Any],
       let peerId = args[peerIdArg] as? Int
     else {
-      result(FlutterError(code: "bad_args", message: "forgetPeer requires peerId", details: nil))
+      reject(result, "forgetPeer", code: "bad_args", message: "forgetPeer requires peerId")
       return
     }
+    BridgeLog.d("method", "forgetPeer \(peerHex(peerId))")
     ProximityController.shared.distanceEstimator.forget(peerId: peerId)
     result(nil)
+  }
+}
+
+/// The logs event channel: hands the sink to BridgeLog, which flushes the
+/// lines logged while nobody listened.
+private final class LogStreamHandler: NSObject, FlutterStreamHandler {
+  func onListen(withArguments arguments: Any?, eventSink events: @escaping FlutterEventSink)
+    -> FlutterError?
+  {
+    BridgeLog.attachDart(events)
+    return nil
+  }
+
+  func onCancel(withArguments arguments: Any?) -> FlutterError? {
+    BridgeLog.attachDart(nil)
+    return nil
   }
 }
