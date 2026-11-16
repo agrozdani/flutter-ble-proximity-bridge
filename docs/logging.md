@@ -45,7 +45,7 @@ native unit tests.
 | | Dart lines | Native lines |
 |---|---|---|
 | Console | printed (`flutter run` shows them; logcat tag `flutter` on Android) | logcat tag `BPB` (Android) / os_log category `BPB` (iOS) |
-| `flutter run` | yes | yes on Android; on an iPhone/iPad only with `LOG_ECHO_NATIVE=true` (seen on an iPad, below); on the iOS simulator Dart echoes them (below) |
+| `flutter run` | yes | yes on Android; on the one iPad checked, only with `LOG_ECHO_NATIVE=true` (below); on the iOS simulator Dart echoes them (below) |
 | Log file on the device | yes (sent to native) | yes |
 | In-app viewer | yes | yes (sent to Dart) |
 

@@ -7,7 +7,6 @@
 	objects = {
 
 /* Begin PBXBuildFile section */
-		02B2E9DEE5854030EDB5FC2E /* Foundation.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = B19DFCFB44C4176BCA3FD7C9 /* Foundation.framework */; };
 		0610DA491E8E2537F9720A06 /* Pods_Runner.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = E0095E008AD2092CB75908D2 /* Pods_Runner.framework */; };
 		0BB1D6E000000000000000B1 /* ProximityController.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BB1D6E000000000000000A1 /* ProximityController.swift */; };
 		0BB1D6E000000000000000B2 /* StatusPayloadSupplier.swift in Sources */ = {isa = PBXBuildFile; fileRef = 0BB1D6E000000000000000A2 /* StatusPayloadSupplier.swift */; };
@@ -92,7 +91,6 @@
 		97C147001CF9000F007C117D /* Base */ = {isa = PBXFileReference; lastKnownFileType = file.storyboard; name = Base; path = Base.lproj/LaunchScreen.storyboard; sourceTree = "<group>"; };
 		97C147021CF9000F007C117D /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		9C33191E48F867B442156359 /* RunnerUITests.xctest */ = {isa = PBXFileReference; explicitFileType = wrapper.cfbundle; includeInIndex = 0; path = RunnerUITests.xctest; sourceTree = BUILT_PRODUCTS_DIR; };
-		B19DFCFB44C4176BCA3FD7C9 /* Foundation.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = Foundation.framework; path = Platforms/iPhoneOS.platform/Developer/SDKs/iPhoneOS26.0.sdk/System/Library/Frameworks/Foundation.framework; sourceTree = DEVELOPER_DIR; };
 		B854CBEBBC594F4FCD94117C /* Pods_RunnerTests.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; includeInIndex = 0; path = Pods_RunnerTests.framework; sourceTree = BUILT_PRODUCTS_DIR; };
 		BB191C98D80CCEDB1B0D2719 /* Pods-RunnerTests.release.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.release.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.release.xcconfig"; sourceTree = "<group>"; };
 		C4025240B5EE56DCE43B6FB1 /* Pods-RunnerTests.profile.xcconfig */ = {isa = PBXFileReference; includeInIndex = 1; lastKnownFileType = text.xcconfig; name = "Pods-RunnerTests.profile.xcconfig"; path = "Target Support Files/Pods-RunnerTests/Pods-RunnerTests.profile.xcconfig"; sourceTree = "<group>"; };
@@ -106,7 +104,6 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
-				02B2E9DEE5854030EDB5FC2E /* Foundation.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -158,14 +155,6 @@
 				C4025240B5EE56DCE43B6FB1 /* Pods-RunnerTests.profile.xcconfig */,
 			);
 			path = Pods;
-			sourceTree = "<group>";
-		};
-		8AAE375D9F9D1ED5AB255148 /* iOS */ = {
-			isa = PBXGroup;
-			children = (
-				B19DFCFB44C4176BCA3FD7C9 /* Foundation.framework */,
-			);
-			name = iOS;
 			sourceTree = "<group>";
 		};
 		9740EEB11CF90186004384FC /* Flutter */ = {
@@ -233,7 +222,6 @@
 			children = (
 				E0095E008AD2092CB75908D2 /* Pods_Runner.framework */,
 				B854CBEBBC594F4FCD94117C /* Pods_RunnerTests.framework */,
-				8AAE375D9F9D1ED5AB255148 /* iOS */,
 			);
 			name = Frameworks;
 			sourceTree = "<group>";
@@ -668,11 +656,10 @@
 		5331CFA175CC615A328F9B10 /* Debug */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.bleProximityBridge.RunnerUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -686,11 +673,10 @@
 		5F02D0ED17D3D2EEAA0E1FD5 /* Release */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.bleProximityBridge.RunnerUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";
@@ -861,11 +847,10 @@
 		AE4070D2456E9429A240855A /* Profile */ = {
 			isa = XCBuildConfiguration;
 			buildSettings = {
-				CLANG_ENABLE_OBJC_WEAK = NO;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				GENERATE_INFOPLIST_FILE = YES;
-				IPHONEOS_DEPLOYMENT_TARGET = 15.5;
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
 				MARKETING_VERSION = 1.0;
 				PRODUCT_BUNDLE_IDENTIFIER = com.example.bleProximityBridge.RunnerUITests;
 				PRODUCT_NAME = "$(TARGET_NAME)";

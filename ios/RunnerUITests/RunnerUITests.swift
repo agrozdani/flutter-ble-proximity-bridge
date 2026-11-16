@@ -3,12 +3,21 @@ import XCTest
 // UI tests that drive the real app on a device or simulator. Run them with
 // tool/ios_ui_test.sh; see docs/device-testing.md.
 //
-// They run in the Profile configuration: a Flutter debug build can't start
-// on a physical iOS device unless a debugger is attached, and XCUITest
-// launches without one. Profile builds start with mock peers off, so the
-// tests switch them on.
+// On hardware they run in the Profile configuration: a Flutter debug build
+// can't start on a physical iOS device unless a debugger is attached, and
+// XCUITest launches without one. Simulators run Debug. Mock peers start on
+// in Debug and off in Profile, so a test that depends on them sets the
+// switch itself.
 final class RunnerUITests: XCTestCase {
   private var app: XCUIApplication!
+
+  /// Local time with milliseconds, as in the app's log lines.
+  private static let timeFormat: DateFormatter = {
+    let format = DateFormatter()
+    format.locale = Locale(identifier: "en_US_POSIX")
+    format.dateFormat = "yyyy-MM-dd HH:mm:ss.SSS"
+    return format
+  }()
 
   override func setUpWithError() throws {
     continueAfterFailure = false
@@ -60,7 +69,8 @@ final class RunnerUITests: XCTestCase {
   ///                   the Bluetooth prompt if iOS shows it.
   ///   start-mock      Start with mock peers.
   ///   stop            Stop.
-  ///   status:TEXT     Tap the status chip whose label contains TEXT.
+  ///   status:TEXT     Tap the first element whose label contains TEXT
+  ///                   (the status chips come first on the home screen).
   ///   hold:SECONDS    Wait, leaving the app as it is.
   ///   logs            Open the Logs screen.
   ///   tap:LABEL       Tap the element labelled exactly LABEL.
@@ -69,7 +79,8 @@ final class RunnerUITests: XCTestCase {
   ///
   /// Each step is an activity named "SCENARIO <time> <step>", which shows in
   /// xcodebuild's output as the step begins, so other devices can be driven
-  /// in step with it.
+  /// in step with it. The time is the device's local time with
+  /// milliseconds, in the format of the app's log lines.
   func testScenario() throws {
     let script = ProcessInfo.processInfo.environment["SCENARIO"] ?? ""
     try XCTSkipIf(script.isEmpty, "SCENARIO not set")
@@ -78,10 +89,10 @@ final class RunnerUITests: XCTestCase {
       let parts = step.split(separator: ":", maxSplits: 1).map(String.init)
       let argument = parts.count > 1 ? parts[1] : ""
       // An activity, unlike print, shows in xcodebuild's output on devices.
-      let name = "SCENARIO \(ISO8601DateFormatter().string(from: Date())) \(step)"
+      let name = "SCENARIO \(Self.timeFormat.string(from: Date())) \(step)"
       XCTContext.runActivity(named: name) { _ in run(step: parts[0], argument: argument) }
     }
-    XCTContext.runActivity(named: "SCENARIO \(ISO8601DateFormatter().string(from: Date())) done") { _ in }
+    XCTContext.runActivity(named: "SCENARIO \(Self.timeFormat.string(from: Date())) done") { _ in }
   }
 
   private func run(step: String, argument: String) {
@@ -104,7 +115,11 @@ final class RunnerUITests: XCTestCase {
       XCTAssertTrue(chip.waitForExistence(timeout: 5), "no status \(argument)")
       chip.tap()
     case "hold":
-      Thread.sleep(forTimeInterval: TimeInterval(argument) ?? 0)
+      guard let seconds = TimeInterval(argument), seconds >= 0 else {
+        XCTFail("hold needs a number of seconds, got \"\(argument)\"")
+        return
+      }
+      Thread.sleep(forTimeInterval: seconds)
     case "logs":
       element("Logs").tap()
       XCTAssertTrue(element("Back").waitForExistence(timeout: 5), "log screen did not open")

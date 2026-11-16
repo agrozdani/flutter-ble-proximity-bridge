@@ -128,8 +128,11 @@ final class BridgeLog {
   /// Whether Dart should print the native lines it receives. On a simulator
   /// `flutter run` does not show them: it filters the simulator's os_log to
   /// messages from the app's main executable, and debug builds (Xcode 15+)
-  /// put the app's code in Runner.debug.dylib. On a device it shows them
-  /// (devicectl console with OS_ACTIVITY_DT_MODE), so Dart must not.
+  /// put the app's code in Runner.debug.dylib. On a device Dart does not
+  /// echo by default, since a console that shows native lines on its own
+  /// would then print each twice. On an iPad (iOS 27.2.1, Xcode 27.2,
+  /// Flutter 3.47.9) `flutter run` did not show them, though; run with
+  /// `--dart-define=LOG_ECHO_NATIVE=true` there (docs/logging.md).
   static var dartShouldEcho: Bool {
     #if targetEnvironment(simulator)
       return true

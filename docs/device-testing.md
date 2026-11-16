@@ -31,9 +31,18 @@ tool/android_ui.sh screenshot /tmp/running.png
 tool/android_ui.sh tap Stop
 ```
 
-Set `ANDROID_SERIAL` when more than one device is attached. Labels match
-exactly; multi-line labels show `\n` in `texts` output and can't be tapped
-by label, so use `swipe` or `adb shell input tap X Y` for those.
+Set `ANDROID_SERIAL` when more than one device is attached. When adb can't
+reach the device (e.g. a wrong `ANDROID_SERIAL`), the script stops with
+adb's own error message. Labels match exactly. Line breaks (and tabs) in a label show as `\n` (`\t`) in
+`texts`; pass such a label exactly as printed, in single quotes:
+
+```bash
+tool/android_ui.sh tap 'Mock peers\nSynthetic sightings — works on simulators, no Bluetooth or permissions needed'
+```
+
+A text field is found by its placeholder (`hint`), e.g.
+`tap 'Filter (peer id, component, text)'`; then type with
+`adb shell input text ...`.
 
 ## iOS (iPhone, iPad, simulator)
 
@@ -43,8 +52,8 @@ is a test method in
 [`RunnerUITests.swift`](../ios/RunnerUITests/RunnerUITests.swift).
 
 ```bash
-DEVELOPMENT_TEAM=<your team id> tool/ios_ui_test.sh <device UDID>
-tool/ios_ui_test.sh <device UDID> RunnerUITests/RunnerUITests/testOpenLogScreen
+DEVELOPMENT_TEAM=<your team id> tool/ios_ui_test.sh <iPhone/iPad UDID>
+tool/ios_ui_test.sh <simulator UDID> RunnerUITests/RunnerUITests/testOpenLogScreen
 ```
 
 A test is named target/class/method; a name that matches nothing still
@@ -55,27 +64,32 @@ two-device Bluetooth tests where another device is driven alongside:
 
 ```bash
 SCENARIO="start,hold:120,status:Busy,hold:60,stop,hold:60,start,hold:120,logs,shot:logs,back,stop" \
-  DEVELOPMENT_TEAM=<team id> tool/ios_ui_test.sh <device UDID> RunnerUITests/RunnerUITests/testScenario
+  DEVELOPMENT_TEAM=<team id> tool/ios_ui_test.sh <iPhone/iPad UDID> RunnerUITests/RunnerUITests/testScenario
 ```
 
 `start` turns mock peers off and accepts iOS's Bluetooth prompt if it
 shows. Each step prints `SCENARIO <time> <step>` in the xcodebuild output
-as it begins, so a script can wait for it and act on the other device. The
-full step list is in the test's doc comment.
+as it begins, the time in the device's local time with milliseconds like
+the app's log lines, so a script can wait for it and act on the other
+device. The full step list is in the test's doc comment.
 
-UDIDs come from `xcrun devicectl list devices` (hardware) or
-`xcrun simctl list devices` (simulators). Results, with a screenshot per
-step, land in `build/ios_ui_tests/<time>.xcresult`. Open it in Xcode, or
-export screenshots with
+For an iPhone or iPad, use the UDID that the table printed by
+`xcrun devicectl list devices` marks `(UDID)` (the `identifier` in its
+JSON output is a different id). For a simulator, use the id from
+`xcrun simctl list devices`; the script boots it if needed. Results land in
+`build/ios_ui_tests/<time>.xcresult`, with a screenshot for each `shot:`
+step and one at the end of each test. Open it in Xcode, or export the
+screenshots with
 `xcrun xcresulttool export attachments --path <bundle> --output-path <dir>`.
 
 ### Signing stays out of the repo
 
-The committed project leaves `DEVELOPMENT_TEAM` empty on every target,
-`RunnerUITests` included. The script passes your team as a build setting
-on the `xcodebuild` command line with `-allowProvisioningUpdates`, which
-signs the app and the UI-test runner without touching `project.pbxproj`.
-Simulators need the team too. Before pushing, check that no team ID got in:
+The committed project sets no team: `DEVELOPMENT_TEAM` is `""` on
+`Runner` and absent on `RunnerTests` and `RunnerUITests`. For an iPhone or
+iPad, the script passes your team as a build setting on the `xcodebuild`
+command line with `-allowProvisioningUpdates`, which signs the app and the
+UI-test runner without touching `project.pbxproj`. Simulators need no team
+(Xcode signs to run locally). Before pushing, check that no team ID got in:
 
 ```bash
 git diff origin/main -- ios/Runner.xcodeproj | grep DEVELOPMENT_TEAM
@@ -85,6 +99,8 @@ It should print nothing. A line starting with `+` means a team ID got in.
 
 ### One-time device setup
 
+- iOS 17 or later: the UI-test bundle's minimum, because Xcode 27's XCTest
+  is built for iOS 17. The app itself still supports iOS 15.5.
 - Developer Mode on (Settings → Privacy & Security → Developer Mode).
 - **Settings → Developer → Enable UI Automation** on. Without it the run
   fails with `Timed out while enabling automation mode`.
@@ -96,7 +112,10 @@ On hardware the script tests the Profile configuration (the scheme's
 default). A Flutter debug build won't start on a physical iOS device without
 a debugger attached, and XCUITest launches the app without one. Flutter has
 no profile mode for simulators, so for a simulator UDID the script switches
-to Debug, which runs there unattached. In Profile builds `kDebugMode` is false, so mock peers
-start off and each test switches them on. Profile builds log at debug
-level like debug builds (see [logging.md](logging.md)), so a UI-test run
-can be followed with `devlogs` as usual.
+to Debug, which runs there unattached. Mock peers start on in Debug and off
+in Profile (they default to `kDebugMode`), so a test that depends on them
+sets the switch: `testStartAndStopWithMockPeers` and the scenario's
+`start-mock` switch them on, the scenario's `start` switches them off.
+Profile builds log at debug level like debug builds (see
+[logging.md](logging.md)), so a UI-test run can be followed with `devlogs`
+as usual.
