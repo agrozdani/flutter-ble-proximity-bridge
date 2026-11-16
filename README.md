@@ -37,6 +37,7 @@ Flutter interface, paired with an implementation that can be adapted directly.
 | Single long-lived BLE host | BLE stacks neither stop cleanly on demand nor survive rebuild races | [architecture.md](docs/architecture.md#stopping-is-a-protocol-problem) |
 | Protocol-level goodbye/hello | A stopped peripheral can't disconnect its centrals — peers would see a ghost | [architecture.md](docs/architecture.md#stopping-is-a-protocol-problem) |
 | Frame-over-cache precedence | The BLE library keeps reporting the payload it last *read*, which would overrule a goodbye/hello that just arrived | [architecture.md](docs/architecture.md#stopping-is-a-protocol-problem) |
+| Payload revisions | Arrival order can't tell an old payload from a new one: frames arrive late, relays hold old copies | [channel-contract.md](docs/channel-contract.md#wire-payload-ble) |
 | Foreground service for background BLE | Android kills background scanning without one | [android.md](docs/android.md) |
 | Bluetooth background modes | iOS suspends a backgrounded app's BLE work without them | [ios.md](docs/ios.md) |
 | Transport-agnostic mock source | The full bridge runs on simulators with zero Bluetooth | [architecture.md](docs/architecture.md) |
@@ -237,13 +238,15 @@ flowchart LR
     subgraph Native["Native · Kotlin / Swift"]
         direction TB
         Dispatch["MainActivity / AppDelegate<br/>channel registration + dispatch"]
-        Host["ProximityService / ProximityController<br/>host + sighting pipeline"]
+        Host["ProximityService / ProximityController<br/>host + sightings"]
+        Pipeline["PayloadPipeline<br/>Herald delegate + FrameOverrides"]
         Codec["StatusPayloadSupplier<br/>16-byte codec"]
         Dist["DistanceEstimator<br/>median → Kalman → bucket"]
         Mock["MockPeerSource"]
         Herald["Herald SensorArray"]
         Dispatch --> Host
-        Herald --> Host
+        Herald --> Pipeline
+        Pipeline --> Host
         Mock --> Host
         Host --> Dist
         Herald <--> Codec
@@ -380,8 +383,10 @@ most approachable to the most involved.
   / [`AppDelegate.swift`](ios/Runner/AppDelegate.swift).
 - **Native → Dart events.** Read
   [`proximity_event_channel.dart`](lib/src/bridge/proximity_event_channel.dart)
-  and [`bridge_event.dart`](lib/src/models/bridge_event.dart), then the sighting
-  pipeline and `emit`/sink handling in
+  and [`bridge_event.dart`](lib/src/models/bridge_event.dart), then
+  [`PayloadPipeline.kt`](android/app/src/main/kotlin/com/example/ble_proximity_bridge/PayloadPipeline.kt)
+  / [`PayloadPipeline.swift`](ios/Runner/PayloadPipeline.swift), which turns
+  Herald's callbacks into sightings, and the `emit`/sink handling in
   [`ProximityService.kt`](android/app/src/main/kotlin/com/example/ble_proximity_bridge/ProximityService.kt)
   / [`ProximityController.swift`](ios/Runner/ProximityController.swift).
 - **Payload encoding.** Compare
@@ -430,17 +435,23 @@ radio:
   and its edge cases — including integer-typed measurements being widened to
   `double` (defensive: the codec itself preserves native `Double`s).
 
-The native tests cover the two pieces of native logic that need no radio
-either, with the same cases on both platforms:
+The native tests cover the native logic that needs no radio either, with the
+same cases on both platforms:
 
 - `StatusPayloadSupplierTest.kt` / `StatusPayloadSupplierTests` (Swift) pin the
   16-byte wire format against one shared set of golden bytes: each encoder
   must produce its own platform's bytes exactly, and each decoder is run on
   the other platform's, so the Kotlin and Swift codecs are checked against
-  each other rather than only against themselves.
-- `FrameOverridesTest.kt` / `FrameOverridesTests` (Swift) cover the rule
-  that lets a goodbye/hello frame outvote a cached payload until the next
-  fresh read or its timeout (shorter for a goodbye from an iPhone).
+  each other rather than only against themselves. They also cover when the
+  payload revision changes, and the status hand-over to a rebuilt host's
+  supplier.
+- `FrameOverridesTest.kt` / `FrameOverridesTests` (Swift) cover which payload
+  wins: a goodbye/hello frame over a cached payload until the next fresh read
+  or its timeout (shorter for a goodbye from an iPhone), and the newest
+  revision over stale frames, reads and relayed copies.
+- `PayloadPipelineTest.kt` / `PayloadPipelineTests` (Swift) drive the pipeline
+  through Herald's own delegate callbacks: how each callback is classified,
+  the self-sighting guard, and recording while stopped.
 
 ## Adapting it for your own app
 

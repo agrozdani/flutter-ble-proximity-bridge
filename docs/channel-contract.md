@@ -125,7 +125,11 @@ After a goodbye frame, the native side stops reporting that peer from
 payloads the BLE library merely has cached, until the peer's payload is read
 afresh or a timeout passes (5 s for a goodbye from an iPhone, 30 s
 otherwise) — otherwise the cached online copy would bring the peer
-straight back. The same applies in reverse after a hello.
+straight back. The same applies in reverse after a hello. A frame or
+payload read whose revision (see the wire payload below) is older than one
+already seen from that peer is ignored, so a goodbye delivered late cannot
+remove a peer that is back, and a stale relayed copy cannot bring back one
+that is gone.
 
 ### `{type: "peer", ...}`
 
@@ -161,8 +165,8 @@ identically in Kotlin and Swift. 16 bytes, little-endian:
 | 8 | 1 | UInt8 | status code |
 | 9 | 1 | UInt8 | color index |
 | 10 | 1 | UInt8 | device kind (0 = iOS, 1 = Android) |
-| 11 | 1 | UInt8 | flags — bit 0: offline (goodbye) |
-| 12 | 4 | UInt32 | protocol version (currently 2) |
+| 11 | 1 | UInt8 | flags — bit 0: offline (goodbye); bits 1–7: payload revision (from version 3) |
+| 12 | 4 | UInt32 | protocol version (currently 3) |
 
 Decoding rules, enforced on both platforms:
 
@@ -173,9 +177,28 @@ Decoding rules, enforced on both platforms:
   on the service UUID could.
 - A malformed payload must never crash the listener — peers may run other
   builds of this app, or other apps entirely if they collide on the UUID.
-- The format is append-only: new fields go after the current 16 bytes and bump
-  the protocol version, so old builds keep decoding the prefix they know.
-  (Version 2 assigned meaning to the formerly-reserved flags byte.)
+- The revision is a 7-bit counter that wraps after 127. The sender takes
+  the next value from one counter per process when its payload supplier is
+  created and whenever its status, color, offline flag or peer id actually
+  changes. Receivers compare revisions with serial-number arithmetic: 1–63
+  steps ahead is newer, 65–127 ahead is older, exactly 64 apart is
+  unordered. Before version 3, bits 1–7 were always 0, so a payload with a
+  lower version has no revision, and receivers fall back to the timeout
+  rule alone for it.
+- Only bit 0 of the flags is read by builds before version 3, and none of
+  them read the version field, so version 3 payloads decode on them
+  unchanged.
+- New fields go into spare bits or after the current 16 bytes, and bump the
+  protocol version. (Version 2 assigned meaning to the formerly-reserved
+  flags byte; version 3 to its bits 1–7.) Appending has two costs, both
+  visible in Herald 2.2.0's source. A frame is a 3-byte header plus the
+  payload, and Herald for Android writes it to an iPhone in one
+  `writeCharacteristic` call. 3 + 16 = 19 bytes fits the 20 that one write
+  carries at the default MTU of 23; anything longer needs a long write,
+  whose handling by Herald and CoreBluetooth was not verified. And
+  Herald's iOS relay splitter cuts a relayed list into pieces the length of
+  the *receiver's own* payload, so builds with different payload lengths
+  would garble each other's relays.
 
 The same 16 bytes also travel as **goodbye/hello frames** over Herald's
 immediate-send channel (`SensorArray.immediateSendAll`): on logical stop a

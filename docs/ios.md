@@ -5,11 +5,13 @@ Files: `ios/Runner/`
 | File | Role |
 |---|---|
 | `AppDelegate.swift` | Channel registration, method dispatch, start validation |
-| `ProximityController.swift` | Singleton hosting Herald/mock, stream handler, sighting pipeline |
-| `StatusPayloadSupplier.swift` | 16-byte payload encode/decode |
+| `ProximityController.swift` | Singleton hosting Herald/mock, stream handler, event emission |
+| `PayloadPipeline.swift` | Herald's delegate: classifies each payload callback, drops our own, resolves it via `FrameOverrides` |
+| `StatusPayloadSupplier.swift` | 16-byte payload encode/decode, payload revisions |
 | `DistanceEstimator.swift` | Per-peer window → median → Kalman → bucket |
 | `KalmanFilter1D.swift` | Small 1-D Kalman-style smoothing filter |
-| `FrameOverrides.swift` | Lets a goodbye/hello frame outvote a cached payload |
+| `FrameOverrides.swift` | Decides which payload to believe: frames over cached copies, newest revision over stale ones |
+| `MonotonicClock.swift` | A clock that keeps counting while the device sleeps |
 | `MockPeerSource.swift` | Synthetic sightings for the simulator |
 
 ## Channel registration (scene-based template)
@@ -75,10 +77,10 @@ Dart, which is why the Dart permission helper is Android-only.
 
 ## Threading
 
-Herald delivers `SensorDelegate` callbacks on its own dispatch queues.
-The controller:
+Herald delivers `SensorDelegate` callbacks, to `PayloadPipeline`, on its
+own dispatch queues. The pipeline and the controller:
 
-1. decodes and estimates on the callback queue — touching only state that
+1. decode and estimate on the callback queue — touching only state that
    is safe there (`sourceMode` and the local peer id sit behind a lock; the
    estimator and the frame overrides lock internally; `payloadSupplier` is
    main-thread-only and is not read from Herald's queues),
