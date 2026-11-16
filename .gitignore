@@ -43,3 +43,6 @@ app.*.map.json
 /android/app/debug
 /android/app/profile
 /android/app/release
+
+# Device logs collected by tool/devlogs.dart (docs/logging.md)
+/logs/
