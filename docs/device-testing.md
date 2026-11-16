@@ -81,7 +81,7 @@ Simulators need the team too. Before pushing, check that no team ID got in:
 git diff origin/main -- ios/Runner.xcodeproj | grep DEVELOPMENT_TEAM
 ```
 
-The only match should be the existing empty `DEVELOPMENT_TEAM = "";`.
+It should print nothing. A line starting with `+` means a team ID got in.
 
 ### One-time device setup
 
