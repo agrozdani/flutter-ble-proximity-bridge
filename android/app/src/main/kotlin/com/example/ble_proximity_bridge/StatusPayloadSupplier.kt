@@ -8,6 +8,7 @@ import io.heraldprox.herald.sensor.datatype.PayloadTimestamp
 import io.heraldprox.herald.sensor.datatype.UInt32
 import io.heraldprox.herald.sensor.datatype.UInt8
 import io.heraldprox.herald.sensor.payload.DefaultPayloadDataSupplier
+import java.util.concurrent.atomic.AtomicInteger
 
 /**
  * Encodes the payload we broadcast and decodes payloads from peers. The
@@ -21,20 +22,33 @@ import io.heraldprox.herald.sensor.payload.DefaultPayloadDataSupplier
  * offset 8     UInt8   status code
  * offset 9     UInt8   color index
  * offset 10    UInt8   device kind (0 = iOS, 1 = Android)
- * offset 11    UInt8   flags (bit 0 = offline / goodbye)
+ * offset 11    UInt8   flags (bit 0 = offline / goodbye,
+ *                      bits 1-7 = payload revision, from version 3)
  * offset 12-15 UInt32  protocol version
  * ```
  *
- * The offline flag matters because BLE has no built-in goodbye. Decoders
- * are defensive: bad payloads are dropped, not allowed to crash anything.
+ * The offline flag matters because BLE has no built-in goodbye. The
+ * revision lets a receiver tell which of two payloads from the same peer is
+ * newer (see FrameOverrides). Decoders are defensive: bad payloads are
+ * dropped, not allowed to crash anything.
  */
-class StatusPayloadSupplier(peerId: Long) : DefaultPayloadDataSupplier() {
+class StatusPayloadSupplier(
+    peerId: Long,
+    private val revisions: RevisionCounter = RevisionCounter.shared,
+) : DefaultPayloadDataSupplier() {
 
     companion object {
         const val DEVICE_KIND_IOS = 0
         const val DEVICE_KIND_ANDROID = 1
-        const val PROTOCOL_VERSION = 2L
+        const val PROTOCOL_VERSION = 3L
         const val FLAG_OFFLINE = 0x01
+
+        /** The first protocol version whose flags carry a revision. */
+        const val FIRST_VERSION_WITH_REVISION = 3L
+        private const val REVISION_SHIFT = 1
+
+        /** Revisions are 7 bits (flags bits 1-7) and wrap around. */
+        const val REVISION_MASK = 0x7F
 
         private const val OFFSET_PEER_ID = 0
         private const val OFFSET_STATUS = 8
@@ -43,6 +57,20 @@ class StatusPayloadSupplier(peerId: Long) : DefaultPayloadDataSupplier() {
         private const val OFFSET_FLAGS = 11
         private const val OFFSET_VERSION = 12
         private const val PAYLOAD_SIZE = 16
+
+        /**
+         * The supplier for a newly built host. It takes over the status and
+         * color of the supplier it replaces, if any, so the new host does
+         * not broadcast a blank status until Dart's next push.
+         */
+        fun forRebuiltHost(
+            peerId: Long,
+            previous: StatusPayloadSupplier?,
+            revisions: RevisionCounter = RevisionCounter.shared,
+        ): StatusPayloadSupplier =
+            StatusPayloadSupplier(peerId, revisions).also { supplier ->
+                previous?.let { supplier.adoptStatus(it) }
+            }
 
         fun peerIdFrom(data: Data?): Long? {
             if (data == null || data.value.size < PAYLOAD_SIZE) return null
@@ -75,6 +103,17 @@ class StatusPayloadSupplier(peerId: Long) : DefaultPayloadDataSupplier() {
             return flags and FLAG_OFFLINE != 0
         }
 
+        /**
+         * The payload's revision, or null when it has none: a sender before
+         * protocol version 3 leaves flags bits 1-7 at 0.
+         */
+        fun revisionFrom(data: Data?): Int? {
+            val version = versionFrom(data) ?: return null
+            if (version < FIRST_VERSION_WITH_REVISION) return null
+            val flags = data?.subdata(OFFSET_FLAGS)?.uint8(0)?.value ?: return null
+            return (flags shr REVISION_SHIFT) and REVISION_MASK
+        }
+
         fun versionFrom(data: Data?): Long? {
             if (data == null || data.value.size < PAYLOAD_SIZE) return null
             return data.subdata(OFFSET_VERSION)?.uint32(0)?.value
@@ -89,19 +128,22 @@ class StatusPayloadSupplier(peerId: Long) : DefaultPayloadDataSupplier() {
     private var color: Int = 0
     private var offline: Boolean = false
 
+    // Taken from the shared counter, so it is newer than anything an earlier
+    // supplier in this process broadcast under the same peer id.
+    private var revision: Int = revisions.next()
+
     fun updatePeerId(peerId: Long) {
         synchronized(lock) {
+            if (this.peerId == peerId) return
             this.peerId = peerId
+            revision = revisions.next()
         }
     }
 
     /** The id we currently broadcast as. */
     fun currentPeerId(): Long = synchronized(lock) { peerId }
 
-    /**
-     * Takes over the status and color of the supplier this one replaces, so
-     * a rebuilt host does not broadcast a blank status until Dart's next push.
-     */
+    /** Takes over the status and color of the supplier this one replaces. */
     fun adoptStatus(previous: StatusPayloadSupplier) {
         val (previousStatus, previousColor) =
             synchronized(previous.lock) { previous.status to previous.color }
@@ -109,16 +151,24 @@ class StatusPayloadSupplier(peerId: Long) : DefaultPayloadDataSupplier() {
     }
 
     fun update(status: Int, color: Int) {
+        // Clamped as Herald's UInt8 writes them, so a change that never
+        // reaches the wire (300 to 301) takes no revision. Same as iOS.
+        val newStatus = status.coerceIn(0, 255)
+        val newColor = color.coerceIn(0, 255)
         synchronized(lock) {
-            this.status = status
-            this.color = color
+            if (this.status == newStatus && this.color == newColor) return
+            this.status = newStatus
+            this.color = newColor
+            revision = revisions.next()
         }
     }
 
     /** While offline, every payload we serve carries the goodbye flag. */
     fun setOffline(offline: Boolean) {
         synchronized(lock) {
+            if (this.offline == offline) return
             this.offline = offline
+            revision = revisions.next()
         }
     }
 
@@ -134,7 +184,7 @@ class StatusPayloadSupplier(peerId: Long) : DefaultPayloadDataSupplier() {
             id = peerId
             statusNow = status
             colorNow = color
-            flags = if (offline) FLAG_OFFLINE else 0
+            flags = (revision shl REVISION_SHIFT) or (if (offline) FLAG_OFFLINE else 0)
         }
 
         return PayloadData().apply {
@@ -146,5 +196,28 @@ class StatusPayloadSupplier(peerId: Long) : DefaultPayloadDataSupplier() {
             append(UInt8(flags))
             append(UInt32(PROTOCOL_VERSION))
         }
+    }
+}
+
+/**
+ * Hands out payload revisions. The app uses one counter per process, shared
+ * by every supplier: a host rebuilt for a new session keeps the same peer id,
+ * so its supplier must carry on above the old one's revisions. Revisions are
+ * 7 bits and wrap; receivers compare them with serial-number arithmetic.
+ *
+ * The counter lives in memory and starts again in every process. That is
+ * safe here because Dart picks a new random peer id at every launch. An app
+ * that keeps its peer id across launches must persist the counter's last
+ * value with it and continue from there: otherwise receivers that still
+ * remember the previous launch take the new one's payloads, goodbye
+ * included, for older ones (see FrameOverrides).
+ */
+class RevisionCounter {
+    private val last = AtomicInteger(0)
+
+    fun next(): Int = last.incrementAndGet() and StatusPayloadSupplier.REVISION_MASK
+
+    companion object {
+        val shared = RevisionCounter()
     }
 }

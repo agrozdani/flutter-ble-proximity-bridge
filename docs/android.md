@@ -5,11 +5,12 @@ Files: `android/app/src/main/kotlin/com/example/ble_proximity_bridge/`
 | File | Role |
 |---|---|
 | `MainActivity.kt` | Channel registration, method dispatch, start validation |
-| `ProximityService.kt` | Foreground service hosting Herald/mock, stream handler, sighting pipeline |
-| `StatusPayloadSupplier.kt` | 16-byte payload encode/decode |
+| `ProximityService.kt` | Foreground service hosting Herald/mock, stream handler, event emission |
+| `PayloadPipeline.kt` | Herald's delegate: classifies each payload callback, drops our own, resolves it via `FrameOverrides` |
+| `StatusPayloadSupplier.kt` | 16-byte payload encode/decode, payload revisions |
 | `DistanceEstimator.kt` | Per-peer window → median → Kalman → bucket |
 | `KalmanFilter1D.kt` | Small 1-D Kalman-style smoothing filter |
-| `FrameOverrides.kt` | Lets a goodbye/hello frame outvote a cached payload |
+| `FrameOverrides.kt` | Decides which payload to believe: frames over cached copies, newest revision over stale ones |
 | `MockPeerSource.kt` | Synthetic sightings for emulators |
 
 ## Why a foreground service
@@ -84,8 +85,13 @@ Note that Herald 2.2.0 for Android *receives* immediate-send frames but
 never delivers them to the delegate (the call is commented out in its GATT
 server), so `didReceive` never fires here: goodbye/hello frames from this
 device reach iOS peers only, and Android peers drop a stopped device by
-staleness eviction. `FrameOverrides` is wired into the pipeline exactly as
-on iOS, but with no frames arriving it never has anything to override here.
+staleness eviction. `PayloadPipeline` runs `FrameOverrides` exactly as on
+iOS, but with no frames arriving it has no frame to apply here. Its
+revision check could still drop a stale read; with this app's per-launch
+peer ids none arrives in practice, since an Android receiver reads payloads
+straight from the peer and Herald never relays payloads to Android. (A peer
+id reused by a new process would look stale here too; see
+[What is deliberately not here](architecture.md#what-is-deliberately-not-here).)
 
 ## The pending-sink race
 
@@ -128,8 +134,9 @@ Herald delivers `SensorDelegate` callbacks on its worker threads.
 Flutter's `EventSink` must only be touched on the main thread, and can be
 detached by `onCancel` at any moment. The service therefore:
 
-1. does payload decoding and distance estimation on the callback thread
-   (cheap, thread-confined work),
+1. decodes the payload (`PayloadPipeline`) and estimates distance on the
+   callback thread (cheap work; the shared state it touches is
+   synchronized or volatile),
 2. posts the finished event map via `Handler(Looper.getMainLooper())`,
 3. on the main thread, uses the sink under `synchronized(sinkLock)` and
    clears it if `success()` throws — a thrown sink is a detached sink, and
@@ -189,9 +196,13 @@ pre-2.1 legacy service (whose detection is on by default) are disabled to
 keep this app's traffic isolated from any other Herald-based deployment in
 radio range.
 
-Of Herald's nine `SensorDelegate` callbacks, four are wired to the pipeline:
+Herald's delegate is `PayloadPipeline`. Of the nine `SensorDelegate`
+callbacks, the four that carry a payload are handled:
 `didRead` (payload without fresh RSSI), `didReceive` (immediate-send frames —
 the goodbye/hello protocol; never called by Herald 2.2.0 for Android, see
 above), `didShare` (payloads relayed by a peer — Herald's workaround for iOS
 background advertising limits), and the workhorse
 `didMeasure(..., withPayload)` which delivers RSSI and payload together.
+`didRead` counts as a fresh read, `didReceive` as a frame, and the other two
+as copies Herald merely holds, which is what `FrameOverrides` needs to know
+(`PayloadPipelineTest.kt` pins this).

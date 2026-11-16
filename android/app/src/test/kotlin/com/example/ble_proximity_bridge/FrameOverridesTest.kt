@@ -13,10 +13,13 @@ class FrameOverridesTest {
     private val overrides = FrameOverrides(
         ttlMillis = 30_000L,
         iphoneGoodbyeTtlMillis = 5_000L,
+        revisionMemoryMillis = 60_000L,
         now = { clock },
     )
 
-    // Sent by an Android device, so its frames get the full lifetime.
+    // Sent by an Android device, so its frames get the full lifetime. These
+    // carry no revision (a sender before protocol version 3): the tests up
+    // to the revision section pin the frame rule on its own.
     private val online = Payload(
         status = 1,
         color = 2,
@@ -135,5 +138,183 @@ class FrameOverridesTest {
 
         overrides.clearAll()
         assertEquals(online, overrides.resolve(7, Source.CACHED, online))
+    }
+
+    // ----- Revisions (protocol version 3) ----------------------------------
+
+    private fun rev(revision: Int, offline: Boolean = false) =
+        online.copy(offline = offline, revision = revision)
+
+    private fun iphoneRev(revision: Int, offline: Boolean = false) =
+        iphoneOnline.copy(offline = offline, revision = revision)
+
+    @Test
+    fun `a frame older than a payload already seen is dropped`() {
+        // A goodbye that was stuck in the sender's queue arrives after a
+        // read of its newer, online payload.
+        assertEquals(rev(5), overrides.resolve(7, Source.READ, rev(5)))
+
+        assertNull(overrides.resolve(7, Source.FRAME, rev(4, offline = true)))
+        assertEquals(rev(5), overrides.resolve(7, Source.CACHED, rev(5)))
+    }
+
+    @Test
+    fun `a read older than the frame does not end it`() {
+        overrides.resolve(7, Source.FRAME, rev(5, offline = true))
+
+        // Read just before the goodbye, delivered just after it.
+        assertNull(overrides.resolve(7, Source.READ, rev(4)))
+        assertNull(overrides.resolve(7, Source.CACHED, rev(4)))
+    }
+
+    @Test
+    fun `a stale relayed copy is ignored after a fresh offline read`() {
+        assertEquals(rev(6, offline = true), overrides.resolve(7, Source.READ, rev(6, offline = true)))
+
+        // A relay still holds the online payload from before the stop.
+        assertNull(overrides.resolve(7, Source.READ, rev(5)))
+        assertNull(overrides.resolve(7, Source.CACHED, rev(5)))
+    }
+
+    @Test
+    fun `a stale offline copy does not remove a live peer`() {
+        overrides.resolve(7, Source.READ, rev(7))
+
+        // A relay still holds the offline payload from before a restart.
+        assertNull(overrides.resolve(7, Source.READ, rev(6, offline = true)))
+        assertEquals(rev(7), overrides.resolve(7, Source.CACHED, rev(6, offline = true)))
+    }
+
+    @Test
+    fun `after an iPhone goodbye runs out, an older cached payload is believed`() {
+        overrides.resolve(7, Source.FRAME, iphoneRev(9, offline = true))
+
+        clock = 5_000L
+        assertNull(overrides.resolve(7, Source.CACHED, iphoneRev(8)))
+
+        // Readings again: most likely a restart whose hello never arrived.
+        clock = 5_001L
+        assertEquals(iphoneRev(8), overrides.resolve(7, Source.CACHED, iphoneRev(8)))
+    }
+
+    @Test
+    fun `a cached payload newer than the frame ends it`() {
+        overrides.resolve(7, Source.FRAME, rev(3, offline = true))
+
+        assertEquals(rev(4), overrides.resolve(7, Source.CACHED, rev(4)))
+        assertEquals(rev(4), overrides.resolve(7, Source.CACHED, rev(4)))
+    }
+
+    @Test
+    fun `revisions wrap around`() {
+        overrides.resolve(7, Source.READ, rev(127))
+
+        // 0 follows 127.
+        assertEquals(rev(0, offline = true), overrides.resolve(7, Source.FRAME, rev(0, offline = true)))
+        assertNull(overrides.resolve(7, Source.READ, rev(127)))
+    }
+
+    @Test
+    fun `revisions half the range apart are not ordered`() {
+        overrides.resolve(7, Source.READ, rev(0))
+
+        // Neither newer nor older, so not dropped.
+        assertEquals(rev(64, offline = true), overrides.resolve(7, Source.FRAME, rev(64, offline = true)))
+    }
+
+    @Test
+    fun `a payload without a revision is never stale`() {
+        overrides.resolve(7, Source.READ, rev(10))
+
+        assertEquals(offline, overrides.resolve(7, Source.FRAME, offline))
+    }
+
+    @Test
+    fun `the newest revision is remembered while reads keep confirming it`() {
+        overrides.resolve(7, Source.READ, rev(10))
+
+        // A re-read of the same payload.
+        clock = 50_000L
+        overrides.resolve(7, Source.READ, rev(10))
+
+        clock = 110_000L
+        assertNull(overrides.resolve(7, Source.FRAME, rev(9, offline = true)))
+
+        // Not confirmed for longer than the memory: forgotten.
+        clock = 170_001L
+        assertEquals(rev(9, offline = true), overrides.resolve(7, Source.FRAME, rev(9, offline = true)))
+    }
+
+    @Test
+    fun `cached copies do not keep a revision remembered`() {
+        // The last payload a sender process read out before it was killed.
+        overrides.resolve(7, Source.READ, rev(40))
+        // Herald keeps attaching that copy to readings.
+        clock = 30_000L
+        assertEquals(rev(40), overrides.resolve(7, Source.CACHED, rev(40)))
+
+        // A new process under the same peer id, its counter started again:
+        // it looks older, so its reads are dropped...
+        clock = 40_000L
+        assertNull(overrides.resolve(7, Source.READ, rev(2, offline = true)))
+
+        // ...only until 60 s after the last read of revision 40. The
+        // readings in between did not extend that.
+        clock = 60_001L
+        assertEquals(rev(2, offline = true), overrides.resolve(7, Source.READ, rev(2, offline = true)))
+    }
+
+    @Test
+    fun `a cached copy of a goodbye does not stop it from running out`() {
+        overrides.resolve(7, Source.READ, iphoneRev(5))
+        clock = 1_000L
+        overrides.resolve(7, Source.FRAME, iphoneRev(6, offline = true))
+
+        // A relay hands over a copy of the same goodbye.
+        clock = 2_000L
+        assertNull(overrides.resolve(7, Source.CACHED, iphoneRev(6, offline = true)))
+
+        // The goodbye has run out: readings with Herald's older copy are
+        // believed, as without the relay (a restart whose hello was lost).
+        clock = 6_001L
+        assertEquals(iphoneRev(5), overrides.resolve(7, Source.CACHED, iphoneRev(5)))
+    }
+
+    @Test
+    fun `the periodic sweep drops expired entries of peers no longer seen`() {
+        overrides.resolve(7, Source.FRAME, offline)
+        clock = 30_000L
+        overrides.resolve(8, Source.READ, rev(1))
+        assertEquals(2, overrides.trackedPeerCount())
+
+        // The first lookup more than 60 s after the last sweep runs one. Peer
+        // 7's frame (30 s) and revision (60 s) have both run out; peer 8's
+        // revision is 30 s old. The cached payload itself is not remembered.
+        clock = 60_001L
+        overrides.resolve(9, Source.CACHED, online)
+        assertEquals(1, overrides.trackedPeerCount())
+    }
+
+    @Test
+    fun `a revision not confirmed within the memory is forgotten between sweeps`() {
+        clock = 50_000L
+        overrides.resolve(7, Source.READ, rev(10))
+        // Another peer's payload at 100 s runs the periodic sweep, which
+        // keeps peer 7's 50 s old entry.
+        clock = 100_000L
+        overrides.resolve(8, Source.READ, rev(1))
+
+        // At 120 s peer 7's entry is 70 s old; the next sweep is not due, so
+        // the lookup itself must notice it has expired.
+        clock = 120_000L
+        assertEquals(rev(9, offline = true), overrides.resolve(7, Source.FRAME, rev(9, offline = true)))
+    }
+
+    @Test
+    fun `clearAll also forgets revisions`() {
+        overrides.resolve(7, Source.READ, rev(10))
+
+        overrides.clearAll()
+        assertEquals(rev(9, offline = true), overrides.resolve(7, Source.FRAME, rev(9, offline = true)))
     }
 }

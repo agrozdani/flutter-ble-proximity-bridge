@@ -156,8 +156,11 @@ once and reused: logical stop calls `stop()` on it, logical start calls
 follow bluetooth state") and a stopped array can be started again. The host
 is only rebuilt when the session id changes (the advertised service UUID
 must change with it), or on Android when the service hosting it is
-destroyed. Native callbacks are gated by a source-mode flag while logically
-stopped, because surviving connections keep delivering measurements.
+destroyed. While logically stopped, native callbacks are not reported (a
+source-mode flag gates them), because surviving connections keep delivering
+measurements. They still go through `FrameOverrides` (below), since
+Herald's cached payloads outlive the stop: a frame or read that arrives
+meanwhile still applies after the next start.
 
 **PATTERN: protocol-level goodbye/hello.** Since the radio cannot be
 trusted to make us disappear, the *protocol* does it. The payload carries an
@@ -180,8 +183,9 @@ stopped. The pipeline therefore tracks where each payload came from
 (`FrameOverrides`): after a frame from a peer, payloads Herald only *holds*
 for that peer — the one attached to an RSSI reading, or a relayed copy — are
 replaced by what the frame said. A fresh read of the peer's payload ends the
-override, since that is newer than the frame; so does a timeout, in case
-that read never happens. The timeout is two refresh intervals (30 s),
+override, since it is newer than the frame (a read the frame overtook is
+caught by its revision, below); so does a timeout, in case that read never
+happens. The timeout is two refresh intervals (30 s),
 except for a goodbye from an iPhone, which lasts 5 s: an iPhone stops
 advertising and sending keep-alive notifications 0.3 s after its goodbye
 (one keep-alive Herald already scheduled can still follow within 2 s), so
@@ -191,6 +195,41 @@ holding the goodbye longer would hide the iPhone if it came back before
 the next re-read — its hello usually cannot say so (below). An Android
 sender keeps advertising while its blocking send works through its peers,
 so its goodbye keeps the full timeout.
+
+**PATTERN: payload revisions.** Arrival order cannot tell an old payload
+from a new one. A goodbye can arrive late: Herald for Android keeps a frame
+it failed to deliver and writes it on its next connection to that peer. A
+read taken just before a goodbye can be delivered just after it: Herald's
+iOS receiver routes reads through one more queue than frames. And a relay
+can hold any older copy. So from protocol version 3 every payload carries a
+7-bit revision that the sender bumps whenever its payload changes
+([channel-contract.md](channel-contract.md#wire-payload-ble)). A receiver
+remembers the newest revision each peer sent it in a frame or a payload
+read, for 60 s after it last arrived that way, and while it remembers it,
+drops any frame or read older than it. Cached copies never count towards
+that memory: Herald's own repeats the payload it last read, and a relay's
+can be older still, so letting them refresh it would keep an old revision
+alive for as long as readings repeat it. A cached copy older than the
+newest is described by the newest payload when that one is online, and
+dropped when a fresh read said offline. Only when the newest is an offline
+frame whose timeout has passed is the older cached copy believed: readings
+then most likely mean the peer restarted and its hello was lost. Peers on
+builds before version 3 send no revision and get the timeout rule alone.
+
+A late goodbye is only caught if the receiver has already read the newer
+payload. Herald for Android replaces a stuck frame with the next one it
+sends, so a goodbye arrives late only at a peer the restart's hello
+skipped: one the sender had not seen for a minute. That peer could not read
+the stopped sender either, so it has normally forgotten the old revision.
+If the late goodbye reaches it before its first read of the restarted
+sender, the goodbye is believed, and the sender stays hidden there until
+that read or the goodbye's 30 s timeout. Which of the two comes first
+depends on radio timing and was not measured.
+
+Revisions only order the payloads of one process: the counter starts again
+at every launch. That is safe because the peer id changes with every
+launch too; an app that keeps its peer id has to keep the counter with it
+(see [What is deliberately not here](#what-is-deliberately-not-here)).
 
 Which peers a frame reaches depends on Herald's platform implementations:
 
@@ -224,7 +263,10 @@ Which peers a frame reaches depends on Herald's platform implementations:
   advertisement, and a known address is reported with the payload last read
   from it. (Whether a stopped iPhone keeps advertising from the same address
   is up to iOS and was not verified here.) In that case the offline flag in
-  the next payload re-read is what removes it.
+  its next payload re-read should remove it, if Herald for Android can
+  still connect to it at that address. That is iOS behaviour too and was not
+  verified; if it cannot, the iPhone stays listed for as long as those
+  adverts keep coming.
 
 Three safety nets, in order of speed:
 
@@ -286,21 +328,31 @@ These come from Herald 2.2.0, from deliberate scope limits, or from edge
 cases in the Dart controller, and are worth knowing before building on the
 bridge:
 
-- **Relayed payloads can resurrect a stopped iPhone.** Herald's payload
-  sharing has Android devices relay the payloads of iOS peers they have read
-  to other iOS peers, for up to 5 minutes after last seeing them. A relay
-  that never re-read the stopped iPhone's offline payload keeps relaying its
-  last *online* one, so an iOS receiver can see the peer reappear after its
-  goodbye. The frame-over-cache rule above holds such a copy off only
-  while the goodbye lasts (5 s for an iPhone), and only if it is
-  byte-identical to the payload the receiver already holds for that peer:
-  Herald reports any other relayed payload as a fresh read, which ends the
-  goodbye. Such sightings also carry the *relay's* RSSI, so their distance
-  is not the relayed peer's. A sequence number in the payload would let receivers
-  discard stale relays. The same path can hand a device its *own* older
-  payload — the relay only skips a copy that is byte-identical to the
-  peer's current one — which is why the pipeline drops any payload carrying
-  the device's own id.
+- **Relayed payloads can briefly resurrect a stopped iPhone.** Herald's
+  payload sharing has Android devices relay the payloads of iOS peers they
+  have read to other iOS peers, for up to 5 minutes after last seeing them,
+  so a relay can keep handing out a stopped iPhone's last *online* payload.
+  The payload revision catches most of these: a relayed copy older than the
+  newest payload a receiver remembers from that peer is ignored (and a stale
+  *offline* copy no longer removes a live peer). Three gaps remain. Between
+  the end of an iPhone's 5 s goodbye and the receiver's next re-read of its
+  offline payload (≤ ~15 s), a relayed online copy looks exactly like
+  readings from a restart whose hello was lost, and is believed until that
+  re-read. Herald for iOS reports a relayed payload it does not already
+  hold as a fresh read, which cannot be told apart from a read of the peer
+  itself: a relayed copy of an iPhone's goodbye that arrives that way ends
+  the goodbye early, and if the iPhone then restarts and its hello is lost,
+  the receiver keeps it hidden until its next re-read of it. (Whether a
+  relay can still read a stopped iPhone at all was not verified.) And once
+  60 s pass without a frame or payload read from the peer (a re-read of a
+  stopped iPhone counts, since it keeps answering), the receiver forgets its
+  revision, and a stale relay is taken at face value as before; a relayed
+  copy that arrives as a read also keeps the revision remembered, like a
+  read of the peer. Relayed sightings also carry the *relay's* RSSI, so their
+  distance is not the relayed peer's. The same path can hand a device its
+  *own* older payload — the relay only skips a copy that is byte-identical
+  to the peer's current one — which is why the pipeline drops any payload
+  carrying the device's own id.
 - **Android keeps the CPU awake while the process lives.** Every Herald
   `SensorArray` on Android creates a timer that acquires a partial wake
   lock and releases it only in a finalizer. The timer's thread never ends
@@ -336,8 +388,15 @@ bridge:
 
 ## What is deliberately *not* here
 
-- No state persistence: peer identity is per-launch. Persisting it is an
-  application concern, not a bridge concern.
+- No state persistence: peer identity is per-launch, and so is the payload
+  revision counter, which starts again in every process. Persisting the peer
+  id is an application concern, but an app that does it has to persist the
+  counter with it (`RevisionCounter` in `StatusPayloadSupplier.kt` /
+  `.swift`) and continue from its last value. Otherwise a relaunch under the
+  same id looks older than the previous launch to peers that still remember
+  it, and they ignore its payloads, its goodbye included, until they forget
+  the old revision: 60 s after their last frame or payload read from the
+  previous launch.
 - No retry/backoff sophistication beyond resume-retry: production apps
   layer policy on top of the same primitives.
 - No Pigeon: this repo demonstrates the raw channel mechanics that Pigeon
