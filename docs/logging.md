@@ -114,7 +114,7 @@ a simulator `scan failed, bluetooth is not powered on` is too.
 | `dart.bridge` | `identity self=...`; every `start #n` / `stop #n` (n is the generation), each step of the handshake with timings, supersession, failures, phase changes |
 | `dart.channel` | Every method call to native: `→ start ...`, `← start ok 12ms` / `← ... failed code: message` |
 | `dart.events` | `ready`, `gone`, unknown event types, stream errors, undecodable events |
-| `dart.peers` | `+` a peer appeared, `~` its status/color/device/distance bucket changed, `-` removed (goodbye, or evicted after 20 s of silence) |
+| `dart.peers` | `+` a peer appeared, `~` its status/color/device/distance bucket changed, `-` removed (goodbye; on Android also because its device has a new id; or evicted after 20 s of silence, 90 s on Android) |
 | `dart.status` | This device's status/color changes and whether they were pushed |
 | `dart.permissions` | Android permission results, per permission |
 | `dart.stats` | Every 15 s while not idle: phase, events received (`+since last/total`), the peer list with age |
@@ -167,6 +167,12 @@ with:
 | `accepted: older, but the goodbye ran out ...` | Readings after a goodbye expired: likely a restart whose hello was lost |
 | `ignored: older than a read that said offline` | A relayed copy older than a fresh offline read |
 
+On Android, a read that returns a new id from a device last read under
+another id gets its own line before the usual one: `read <payload> via=<address> →
+replaces <old id>, read from that device 89.5s ago; <old id> reported GONE`.
+The old id is removed in Dart with `removed: its device has a new id`
+([android.md](android.md#a-new-id-from-the-same-device)).
+
 To keep the volume down, the most common case, a cached payload accepted
 as it is while running, is not logged by the pipeline; `native.emit` logs
 that sighting with its distance. Frames, departures and every override
@@ -183,11 +189,15 @@ I dart.stats phase=running mock=false gen=3 events peer=+15/121 gone=+0/0 ready=
 
 - `herald:` counts the callbacks since the last line (`read`, `frame`,
   `cached`, `shared`, `detect`, `rssiOnly`, `malformed`, `own`) and each
-  verdict; `whileStopped` counts callbacks after a stop.
+  verdict; `whileStopped` counts callbacks after a stop, `replaced` (Android)
+  old ids retired because their device now has a new one.
 - `to dart: peer=+14/120` is events sent since the last line / in total;
   `nosink` counts events dropped because Dart was not listening. Compare
   with `dart.stats events`: native's sent count and Dart's received count
-  should match (the two timers are not in step, so compare totals).
+  should match (the two timers are not in step, so compare totals). After
+  a stop native may be one or two ahead: an event native sent as Dart
+  cancelled is dropped, so that it can't reach the next session
+  (`ProximityEventChannel`).
 - `bt=` is the last Bluetooth state Herald reported (`?` until it reports
   one: it does so when the state changes) and, on Android, what the
   adapter says right now. iOS has no second source: check the
@@ -270,7 +280,7 @@ are away from the computer, e.g. for distance tests.
 |---|---|
 | A peer never appears | Its sender: `native.payload` / `native.host started` (is it broadcasting?). The receiver: `native.ble` (`bluetooth state off`, iOS `authorization DENIED`, Android `permissions ... DENIED`), `native.stats herald:` (no `detect`/`read`/`cached` at all means Herald hears nothing), `native.pipeline ... own payload` (both devices using the same id) |
 | A peer appears on one device only | Both devices' `native.stats herald:` counts; the silent side's `native.ble` and Herald's faults in logcat / `log.txt` |
-| A peer flickers or vanishes | `dart.peers -` says why: `goodbye` or `evicted: silent for ...`. Before an eviction, `native.stats` shows how long ago its last sample was |
+| A peer flickers or vanishes | `dart.peers -` says why: `goodbye` or `evicted: silent for ...`. Before an eviction, `native.stats` shows how long ago its last sample was. On an Android receiver, `herald: none` for most of each minute with Herald `taskConnectDevice, connect timeout` warnings in between is Herald's scan cycle ([android.md](android.md#herald-listens-in-bursts)) |
 | A stopped peer lingers (ghost) | The receiver's `native.pipeline` lines for that id after the sender's `native.frame sending goodbye`: was the frame received (`frame ... reported GONE`)? Are later cached copies `ignored: the peer's goodbye frame outvotes it`, or `accepted`? |
 | A restarted peer stays hidden | Receiver: `ignored: the peer's goodbye frame outvotes it` until the frame runs out, then `accepted: older, but the goodbye ran out`; or a `read ... online` |
 | A status change does not show | Sender: `native.payload broadcast now ... rev=N`. Receiver: a `read` with that revision within ~15 s, then `dart.peers ~ ... status` |

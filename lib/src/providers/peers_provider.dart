@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../logging/log.dart';
@@ -20,10 +21,31 @@ class PeersController extends Notifier<Map<int, Peer>> {
   /// through, and bookkeeping (last-seen times) happens every time.
   static const Duration _uiThrottle = Duration(milliseconds: 250);
 
-  /// Fallback eviction window. Peers normally announce a goodbye (handled
-  /// by [removeNow]), but one that walks out of range or crashes never
-  /// gets to say it.
-  static const Duration _staleAfter = Duration(seconds: 20);
+  /// Fallback eviction window: how long a peer may go unheard before it is
+  /// dropped. Peers normally announce a goodbye (handled by [removeNow]),
+  /// but one that walks out of range or crashes never gets to say it, and
+  /// an Android receiver never gets goodbyes at all (docs/android.md).
+  late final Duration _staleAfter = staleAfterFor(defaultTargetPlatform);
+
+  /// The eviction window on [platform]: how long this device can go without
+  /// hearing a peer that is still there.
+  ///
+  /// - iOS: Herald scans all the time, so a nearby peer is heard every
+  ///   second or two, and 20 s of silence means it has gone.
+  /// - Android: Herald for Android (2.2.0) listens in bursts. It scans for
+  ///   4 s, then stops scanning while it connects, one device at a time, to
+  ///   each nearby device it has not identified yet (any Apple device its
+  ///   filter lets through), for up to 60 s; a connect can take 8 s to
+  ///   time out, and a device that timed out is tried again next time. With
+  ///   a few Apple devices around that don't run the app, every cycle takes
+  ///   the whole minute, and a peer right next to this device goes unheard
+  ///   for about 60 s at a time. 90 s covers one such cycle with margin.
+  ///   See docs/android.md.
+  @visibleForTesting
+  static Duration staleAfterFor(TargetPlatform platform) =>
+      platform == TargetPlatform.android
+      ? const Duration(seconds: 90)
+      : const Duration(seconds: 20);
 
   final Map<int, DateTime> _lastSeen = {};
   final Map<int, DateTime> _lastEmitted = {};
@@ -32,7 +54,7 @@ class PeersController extends Notifier<Map<int, Peer>> {
   Map<int, Peer> build() {
     final evictionTimer = Timer.periodic(
       const Duration(seconds: 5),
-      (_) => _evictStale(),
+      (_) => evictStale(DateTime.now()),
     );
     ref.onDispose(evictionTimer.cancel);
     return const {};
@@ -72,19 +94,20 @@ class PeersController extends Notifier<Map<int, Peer>> {
     state = {...state, sighting.id: peer};
   }
 
-  /// The peer said goodbye, so drop it right away instead of waiting for
-  /// eviction.
-  void removeNow(int peerId) {
+  /// The peer said goodbye, or ([replaced]) its device now broadcasts another
+  /// id, so drop it right away instead of waiting for eviction.
+  void removeNow(int peerId, {bool replaced = false}) {
     _lastSeen.remove(peerId);
     _lastEmitted.remove(peerId);
+    final why = replaced ? 'its device has a new id' : 'goodbye';
     final peer = state[peerId];
     if (peer == null) {
-      Log.d('peers', 'goodbye from ${peerHex(peerId)}, which is not listed');
+      Log.d('peers', '${peerHex(peerId)} gone ($why), and not listed');
       return;
     }
     Log.i(
       'peers',
-      '- ${peerHex(peerId)} removed: goodbye (listed for '
+      '- ${peerHex(peerId)} removed: $why (listed for '
           '${_seconds(DateTime.now().difference(peer.firstSeen))})',
     );
     state = {...state}..remove(peerId);
@@ -139,15 +162,17 @@ class PeersController extends Notifier<Map<int, Peer>> {
   static String _seconds(Duration duration) =>
       '${(duration.inMilliseconds / 1000).toStringAsFixed(1)}s';
 
-  void _evictStale() {
-    final cutoff = DateTime.now().subtract(_staleAfter);
+  /// Drops every peer not heard for longer than the eviction window. Runs
+  /// every 5 s; [now] is a parameter so tests can move time on.
+  @visibleForTesting
+  void evictStale(DateTime now) {
+    final cutoff = now.subtract(_staleAfter);
     final stale = _lastSeen.entries
         .where((entry) => entry.value.isBefore(cutoff))
         .map((entry) => entry.key)
         .toList();
     if (stale.isEmpty) return;
 
-    final now = DateTime.now();
     final next = {...state};
     for (final id in stale) {
       Log.i(

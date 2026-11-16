@@ -241,8 +241,13 @@ class BridgeController extends Notifier<BridgeState> {
         // and native logs every sighting it emits (native.emit).
         ref.read(peersProvider.notifier).applySighting(event);
       case PeerGone():
-        Log.i('events', 'gone ${peerHex(event.id)}');
-        ref.read(peersProvider.notifier).removeNow(event.id);
+        Log.i(
+          'events',
+          'gone ${peerHex(event.id)}${event.replaced ? ' (replaced)' : ''}',
+        );
+        ref
+            .read(peersProvider.notifier)
+            .removeNow(event.id, replaced: event.replaced);
       case UnknownBridgeEvent():
         Log.w('events', 'unknown event type "${event.type}" ignored');
     }

@@ -1,5 +1,6 @@
 package com.example.ble_proximity_bridge
 
+import android.os.SystemClock
 import io.heraldprox.herald.sensor.SensorDelegate
 import io.heraldprox.herald.sensor.datatype.Data
 import io.heraldprox.herald.sensor.datatype.ImmediateSendData
@@ -9,6 +10,7 @@ import io.heraldprox.herald.sensor.datatype.Proximity
 import io.heraldprox.herald.sensor.datatype.SensorState
 import io.heraldprox.herald.sensor.datatype.SensorType
 import io.heraldprox.herald.sensor.datatype.TargetIdentifier
+import java.util.Locale
 
 /**
  * Herald's delegate. Maps each callback that carries a payload to where
@@ -33,12 +35,21 @@ class PayloadPipeline(
     private val localPeerId: () -> Long?,
     private val listener: Listener,
     private val onMalformed: (size: Int) -> Unit = {},
+    private val now: () -> Long = SystemClock::elapsedRealtime,
 ) : SensorDelegate {
 
     interface Listener {
         fun onSighting(peerId: Long, status: Int, color: Int, deviceKind: Int, rssi: Double?)
 
+        /** The peer said goodbye, or its payload carries the offline flag. */
         fun onGone(peerId: Long)
+
+        /**
+         * The device that broadcast [oldPeerId] now broadcasts [newPeerId]:
+         * the app there started again (ids are per launch), so the old id
+         * is gone.
+         */
+        fun onReplaced(oldPeerId: Long, newPeerId: Long)
     }
 
     /** The last Bluetooth state Herald reported, for the stats line. */
@@ -47,6 +58,11 @@ class PayloadPipeline(
         private set
 
     private val stats = Counters()
+
+    /** The id last read from each device, by Herald target. */
+    private val lastReadIds = HashMap<String, LastRead>()
+
+    private class LastRead(val peerId: Long, val atMillis: Long)
 
     override fun sensor(sensor: SensorType, didRead: PayloadData, fromTarget: TargetIdentifier) {
         // Payload read over GATT (or written to us by the peer); no RSSI.
@@ -152,6 +168,8 @@ class PayloadPipeline(
             return
         }
 
+        if (source == FrameOverrides.Source.READ) retireReplacedId(peerId, data, target)
+
         // Resolve even while stopped: Herald keeps its cached copies across
         // our stop/start, so the frames and reads it delivers meanwhile still
         // matter after the next start.
@@ -176,6 +194,41 @@ class PayloadPipeline(
         } else {
             listener.onSighting(peerId, payload.status, payload.color, payload.deviceKind, rssi)
         }
+    }
+
+    /**
+     * A read is the device at that address giving its own id: Herald for
+     * Android never relays payloads to Android, so no relayed copy arrives
+     * as a read here (on iOS one can, which is why iOS has no such rule).
+     * If the last read there gave another id, the app on that device started
+     * again under a new one, and the old id is gone. Without this, the old id
+     * stays listed: Herald hands over its cached copy of the device's last
+     * read with every RSSI reading until it reads the device again, and then
+     * Dart waits out its eviction window (seen on a Pixel after an iPad's hot
+     * restart: two entries for one iPad for 90 s).
+     *
+     * Only reads count; a cached copy is Herald's memory of a read. A read is
+     * remembered as long as Herald keeps the device ([LAST_READ_MEMORY_MILLIS]).
+     */
+    private fun retireReplacedId(peerId: Long, data: Data, target: TargetIdentifier) {
+        val nowMillis = now()
+        val previous = synchronized(lastReadIds) {
+            lastReadIds.values.removeAll { nowMillis - it.atMillis > LAST_READ_MEMORY_MILLIS }
+            lastReadIds.put(target.value, LastRead(peerId, nowMillis))
+        }
+        if (previous == null || previous.peerId == peerId) return
+
+        val active = isActive()
+        // While stopped, the read itself is counted as whileStopped.
+        if (active) stats.add("replaced")
+        val ago = String.format(Locale.US, "%.1f", (nowMillis - previous.atMillis) / 1000.0)
+        BridgeLog.i(
+            "pipeline",
+            "read ${StatusPayloadSupplier.describe(data)} via=${via(target)} → replaces " +
+                "${peerHex(previous.peerId)}, read from that device ${ago}s ago; " +
+                if (active) "${peerHex(previous.peerId)} reported GONE" else "stopped, so not reported",
+        )
+        if (active) listener.onReplaced(previous.peerId, peerId)
     }
 
     private fun log(
@@ -229,6 +282,15 @@ class PayloadPipeline(
      * Herald 2.2.0 for Android builds it from BluetoothDevice.getAddress().
      */
     private fun via(target: TargetIdentifier): String = target.value.take(17)
+
+    private companion object {
+        /**
+         * How long a device's last read is remembered. Herald for Android
+         * deletes a device, and its cached payload with it, 15 minutes after
+         * the device was last updated (`taskRemoveExpiredDevices`).
+         */
+        const val LAST_READ_MEMORY_MILLIS = 15 * 60_000L
+    }
 
     /** Thread-safe named counters. */
     private class Counters {

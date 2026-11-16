@@ -13,7 +13,8 @@ import org.junit.Test
 /**
  * Drives the pipeline through Herald's own delegate callbacks, so how each
  * callback is classified is under test, not just FrameOverrides. Same cases
- * as PayloadPipelineTests in ios/RunnerTests/RunnerTests.swift.
+ * as PayloadPipelineTests in ios/RunnerTests/RunnerTests.swift, plus the
+ * replaced-id rule, which only Android has (see PayloadPipeline).
  *
  * The classification tests use payloads without a revision (protocol
  * version 2): with one, a misclassified read could be dropped as stale and
@@ -22,6 +23,7 @@ import org.junit.Test
 class PayloadPipelineTest {
 
     private var active = true
+    private var clock = 0L
     private val events = mutableListOf<String>()
     private val malformed = mutableListOf<Int>()
 
@@ -50,8 +52,13 @@ class PayloadPipelineTest {
             override fun onGone(peerId: Long) {
                 events += "gone $peerId"
             }
+
+            override fun onReplaced(oldPeerId: Long, newPeerId: Long) {
+                events += "replaced $oldPeerId by $newPeerId"
+            }
         },
         onMalformed = { malformed += it },
+        now = { clock },
     )
 
     private val ble = SensorType.BLE
@@ -173,6 +180,71 @@ class PayloadPipelineTest {
         pipeline.sensor(ble, SensorState.on)
 
         assertEquals(emptyList<String>(), events)
+    }
+
+    @Test
+    fun `a read of another id from the same device retires the old id`() {
+        pipeline.sensor(ble, payload(7), target)
+        // The app on that device restarted: Herald still hands over its copy
+        // of the last read until it reads the device again.
+        clock += 60_000L
+        pipeline.sensor(ble, reading(-60.0), target, payload(7))
+        clock += 30_000L
+        pipeline.sensor(ble, payload(8), target)
+
+        assertEquals(
+            listOf(
+                "peer 7 status 1 rssi null",
+                "peer 7 status 1 rssi -60.0",
+                "replaced 7 by 8",
+                "peer 8 status 1 rssi null",
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun `reads of two devices do not retire each other`() {
+        pipeline.sensor(ble, payload(7), target)
+        pipeline.sensor(ble, payload(8), TargetIdentifier("other"))
+        pipeline.sensor(ble, payload(7), target)
+
+        assertEquals(
+            listOf(
+                "peer 7 status 1 rssi null",
+                "peer 8 status 1 rssi null",
+                "peer 7 status 1 rssi null",
+            ),
+            events,
+        )
+    }
+
+    @Test
+    fun `a cached copy of another id does not retire the old one`() {
+        pipeline.sensor(ble, payload(7), target)
+        pipeline.sensor(ble, reading(-60.0), target, payload(8))
+
+        assertEquals(listOf("peer 7 status 1 rssi null", "peer 8 status 1 rssi -60.0"), events)
+    }
+
+    @Test
+    fun `a read is remembered only as long as Herald keeps the device`() {
+        pipeline.sensor(ble, payload(7), target)
+        clock += 15 * 60_000L + 1
+        pipeline.sensor(ble, payload(8), target)
+
+        assertEquals(listOf("peer 7 status 1 rssi null", "peer 8 status 1 rssi null"), events)
+    }
+
+    @Test
+    fun `while inactive a replaced id is not reported, and is not reported later`() {
+        pipeline.sensor(ble, payload(7), target)
+        active = false
+        pipeline.sensor(ble, payload(8), target)
+        active = true
+        pipeline.sensor(ble, payload(8), target)
+
+        assertEquals(listOf("peer 7 status 1 rssi null", "peer 8 status 1 rssi null"), events)
     }
 
     private companion object {

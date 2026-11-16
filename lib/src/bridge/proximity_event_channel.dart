@@ -17,7 +17,23 @@ class ProximityEventChannel {
   /// The decoded native event stream. Subscribing triggers the native
   /// onListen, cancelling triggers onCancel.
   Stream<BridgeEvent> events() {
+    _dropEventsNobodyListensTo();
     return _channel.receiveBroadcastStream().map(_decode);
+  }
+
+  /// An event that native sent as Dart cancelled must not reach the next
+  /// subscription. On cancel, EventChannel removes its Dart handler first
+  /// and only then tells native to stop, so events in flight arrive with no
+  /// handler. Flutter then keeps the last of them (ChannelBuffers, 1 message
+  /// per channel by default) and hands it to the next handler: the last
+  /// mock sighting showed up in the next BLE session as a peer that wasn't
+  /// there. Events only flow while Dart listens, so one that finds nobody
+  /// listening belongs to a subscription that has ended: drop it. Marking
+  /// the overflow as expected stops debug builds from warning about it.
+  void _dropEventsNobodyListensTo() {
+    final buffers = ServicesBinding.instance.channelBuffers;
+    buffers.resize(_channel.name, 0);
+    buffers.allowOverflow(_channel.name, true);
   }
 
   static BridgeEvent _decode(Object? raw) {

@@ -49,6 +49,12 @@ abstract final class BridgeEventKeys {
   static const String device = 'device';
   static const String rssi = 'rssi';
   static const String distance = 'distance';
+
+  /// Why a `gone` event was sent. Absent: the peer said goodbye.
+  static const String reason = 'reason';
+
+  /// [reason] when the peer's device now broadcasts another id (Android).
+  static const String reasonReplaced = 'replaced';
 }
 
 /// Diagnostics channels: the native logger's side of the logging system
