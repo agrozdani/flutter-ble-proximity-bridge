@@ -68,6 +68,18 @@ void main() {
     test('decodes a peer goodbye', () {
       final event = BridgeEvent.fromMap({'type': 'gone', 'id': 42});
       expect((event as PeerGone).id, 42);
+      expect(event.replaced, isFalse);
+    });
+
+    test('decodes a peer whose device now has another id', () {
+      // Wire strings, as the Kotlin side sends them (ProximityService).
+      final event = BridgeEvent.fromMap({
+        'type': 'gone',
+        'id': 42,
+        'reason': 'replaced',
+      });
+      expect((event as PeerGone).id, 42);
+      expect(event.replaced, isTrue);
     });
 
     test('tolerates unknown event types', () {

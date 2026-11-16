@@ -12,21 +12,29 @@ sealed class BridgeEvent {
     return switch (map[BridgeEventKeys.type]) {
       BridgeEventKeys.typeReady => const BridgeReady(),
       BridgeEventKeys.typePeer => PeerSighting.fromMap(map),
-      BridgeEventKeys.typeGone => PeerGone(map[BridgeEventKeys.id] as int),
+      BridgeEventKeys.typeGone => PeerGone(
+        map[BridgeEventKeys.id] as int,
+        replaced: map[BridgeEventKeys.reason] == BridgeEventKeys.reasonReplaced,
+      ),
       final other => UnknownBridgeEvent('$other'),
     };
   }
 }
 
-/// A peer told us it stopped.
+/// A peer told us it stopped, or (Android) its device now broadcasts
+/// another id.
 ///
 /// BLE has no goodbye of its own (a stopped device can't kick off peers
 /// that are still connected to it), so the bridge sends one at the protocol
 /// level. Without this a dead peer would linger until eviction.
 class PeerGone extends BridgeEvent {
-  const PeerGone(this.id);
+  const PeerGone(this.id, {this.replaced = false});
 
   final int id;
+
+  /// The device read as [id] was read with a new id: the app there
+  /// started again. Otherwise the peer said goodbye.
+  final bool replaced;
 }
 
 /// The native side finished initializing and the stream is live.

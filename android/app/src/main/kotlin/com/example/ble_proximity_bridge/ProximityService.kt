@@ -87,6 +87,12 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         /** How often the bridge's state is summarized in the log (native.stats). */
         private const val STATS_INTERVAL_MILLIS = 15_000L
 
+        /**
+         * `reason` of a gone event for a peer whose device now broadcasts
+         * another id (PayloadPipeline.Listener.onReplaced).
+         */
+        private const val GONE_REASON_REPLACED = "replaced"
+
         const val EXTRA_SESSION_ID = "sessionId"
         const val EXTRA_PEER_ID = "peerId"
         const val EXTRA_MOCK = "mock"
@@ -167,6 +173,9 @@ class ProximityService : Service(), EventChannel.StreamHandler {
             ) = handleSighting(peerId, status, color, deviceKind, rssi)
 
             override fun onGone(peerId: Long) = emitGone(peerId)
+
+            override fun onReplaced(oldPeerId: Long, newPeerId: Long) =
+                emitGone(oldPeerId, reason = GONE_REASON_REPLACED)
         },
     )
 
@@ -534,11 +543,13 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         mainThread.post { emit(event) }
     }
 
-    private fun emitGone(peerId: Long) {
+    /** [reason] is absent for a goodbye (see docs/channel-contract.md). */
+    private fun emitGone(peerId: Long, reason: String? = null) {
         // Drop the distance model now instead of waiting for Dart to do it.
         distanceEstimator.forget(peerId)
-        BridgeLog.i("emit", "gone ${peerHex(peerId)}")
+        BridgeLog.i("emit", "gone ${peerHex(peerId)}${reason?.let { " ($it)" } ?: ""}")
         val event = hashMapOf<String, Any>("type" to "gone", "id" to peerId)
+        if (reason != null) event["reason"] = reason
         mainThread.post { emit(event) }
     }
 

@@ -94,19 +94,20 @@ class PeersController extends Notifier<Map<int, Peer>> {
     state = {...state, sighting.id: peer};
   }
 
-  /// The peer said goodbye, so drop it right away instead of waiting for
-  /// eviction.
-  void removeNow(int peerId) {
+  /// The peer said goodbye, or ([replaced]) its device now broadcasts another
+  /// id, so drop it right away instead of waiting for eviction.
+  void removeNow(int peerId, {bool replaced = false}) {
     _lastSeen.remove(peerId);
     _lastEmitted.remove(peerId);
+    final why = replaced ? 'its device has a new id' : 'goodbye';
     final peer = state[peerId];
     if (peer == null) {
-      Log.d('peers', 'goodbye from ${peerHex(peerId)}, which is not listed');
+      Log.d('peers', '${peerHex(peerId)} gone ($why), and not listed');
       return;
     }
     Log.i(
       'peers',
-      '- ${peerHex(peerId)} removed: goodbye (listed for '
+      '- ${peerHex(peerId)} removed: $why (listed for '
           '${_seconds(DateTime.now().difference(peer.firstSeen))})',
     );
     state = {...state}..remove(peerId);
