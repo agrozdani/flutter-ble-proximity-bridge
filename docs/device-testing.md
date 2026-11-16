@@ -102,9 +102,13 @@ It should print nothing. A line starting with `+` means a team ID got in.
 - iOS 17 or later: the UI-test bundle's minimum, because Xcode 27's XCTest
   is built for iOS 17. The app itself still supports iOS 15.5.
 - Developer Mode on (Settings → Privacy & Security → Developer Mode).
-- **Settings → Developer → Enable UI Automation** on. Without it the run
-  fails with `Timed out while enabling automation mode`.
 - The device unlocked while the tests run.
+
+If a run fails with `Timed out while enabling automation mode`, check that
+the device is unlocked and look at **Settings → Developer → Enable UI
+Automation**. On the iPad used here (iOS 27.2.1, Xcode 27.2) the tests ran
+with that setting off and with it on; the one run that failed with this
+message has no confirmed cause.
 
 ### Why Profile on hardware, Debug on simulators
 
