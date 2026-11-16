@@ -114,6 +114,7 @@ simulator, 2026-11-16:
 | `flutter run` (debug) on the iPad | stderr | once each, launch header included; also after a hot restart |
 | `flutter run --profile` on the iPad | stderr | once each, launch header included |
 | `flutter debug_adapter` (what VS Code runs), debug, on the iPad | stderr | once each as DAP `output` events (`console` before the app starts, `stdout` after); also after a hot restart |
+| VS Code, F5, debug, on the iPad | stderr | once each in the Debug Console, launch header included |
 | `flutter run` with `FLUTTER_LLDB_DEBUGGING=false` (Xcode runs the app) | os_log | not in `flutter run`, even with `-v`; once each with `LOG_ECHO_NATIVE=true` |
 | XCUITest profile build on the iPad | stderr | not shown by xcodebuild; the log file is complete |
 | `devicectl device process launch`, no console | os_log | nowhere live; in the log file |
@@ -126,10 +127,11 @@ was not seen to stall the app: under Xcode's test runner 1 MB went out in
 running), the app went on writing a 2 KB line every 5 s for the 2 min 40 s
 it was watched.
 
-Not seen, because this Mac gave no screen or accessibility access to read
-other apps' windows: what Xcode's console and VS Code's Debug Console
-panels display. The app's side (os_log under Xcode; one DAP `output` event
-per line for VS Code) is checked; the panels' rendering is not.
+VS Code's Debug Console (F5 on the iPad, debug, 2026-11-16) showed each
+native line once without a `flutter:` prefix, from the launch header and
+`console stderr (OS_ACTIVITY_DT_MODE=enable)` on. Not seen: what Xcode's
+console shows when Xcode's Run button starts the app; the app's side under
+flutter_tools' scripted Xcode run is os_log, above.
 
 `d` (detach) in `flutter run` does not leave the app running on this path:
 the tool's shutdown hook runs `devicectl device process terminate` on it.
