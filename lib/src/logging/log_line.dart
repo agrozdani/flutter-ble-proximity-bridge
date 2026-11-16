@@ -86,11 +86,15 @@ class LogLine {
   static final RegExp _pattern = RegExp(
     r'(\d{4})-(\d{2})-(\d{2}) (\d{2}):(\d{2}):(\d{2})\.(\d{3}) ([DIWE]) '
     r'(dart|native)\.([A-Za-z0-9_]+) ?(.*)$',
+    // The message runs to the end of the text, across the line breaks of a
+    // stack trace.
+    dotAll: true,
   );
 
   /// Finds a log line inside [text], which may carry a prefix from wherever
   /// it was captured (`I/flutter (1234): `, `flutter: `, `[BPB] `, ...).
-  /// Returns null when [text] holds none.
+  /// [text] is one entry: the message is everything after the component,
+  /// continuation lines included. Returns null when [text] holds none.
   static LogLine? find(String text) {
     final match = _pattern.firstMatch(text);
     if (match == null) return null;

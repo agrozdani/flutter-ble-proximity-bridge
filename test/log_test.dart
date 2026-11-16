@@ -1,4 +1,5 @@
 import 'package:ble_proximity_bridge/src/logging/log.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// The log line format is shared with the Kotlin and Swift loggers and
@@ -53,6 +54,21 @@ void main() {
       )!;
       expect(dart.component, 'channel');
       expect(dart.message, '→ stop');
+    });
+
+    test('a multi-line entry keeps its level, and its stack trace', () {
+      // What BridgeLog sends Dart for an error with a stack trace.
+      const entry =
+          '2026-11-16 10:15:03.123 E native.crash [main] uncaught exception '
+          'on thread main: java.lang.IllegalStateException: boom\n'
+          '    java.lang.IllegalStateException: boom\n'
+          '    \tat com.example.Foo.bar(Foo.kt:1)';
+      final parsed = LogLine.find(entry)!;
+      expect(parsed.level, LogLevel.error);
+      expect(parsed.component, 'crash');
+      expect(parsed.message, startsWith('[main] uncaught exception'));
+      expect(parsed.message, endsWith('\tat com.example.Foo.bar(Foo.kt:1)'));
+      expect(parsed.format(), entry);
     });
 
     test('ignores lines that are not ours', () {
@@ -114,6 +130,56 @@ void main() {
       Log.addNative('2026-11-16 10:15:03.123 E native.host [main] broke');
       expect(Log.buffer.records.last.level, LogLevel.error);
       expect(Log.buffer.records.last.native, isTrue);
+    });
+
+    test('a native error with a stack trace is still an error', () {
+      Log.addNative(
+        '2026-11-16 10:15:03.123 W native.frame [frame-sender] goodbye '
+        'failed after 12 ms: java.lang.IllegalStateException: boom\n'
+        '    java.lang.IllegalStateException: boom\n'
+        '    \tat com.example.Foo.bar(Foo.kt:1)',
+      );
+      expect(Log.buffer.records.last.level, LogLevel.warn);
+    });
+  });
+
+  group('Log, once set up,', () {
+    late DebugPrintCallback savedPrint;
+    final printed = <String>[];
+    final forwarded = <(String, bool)>[];
+
+    setUp(() {
+      savedPrint = debugPrint;
+      debugPrint = (String? message, {int? wrapWidth}) =>
+          printed.add('$message');
+      printed.clear();
+      forwarded.clear();
+      Log.printToConsole = true;
+      Log.forwardToNative = (line, {required printed}) =>
+          forwarded.add((line, printed));
+    });
+
+    tearDown(() {
+      debugPrint = savedPrint;
+      Log.printToConsole = false;
+      Log.forwardToNative = null;
+      Log.nativePrintsDart = false;
+    });
+
+    test('prints a line and tells native it did', () {
+      Log.i('test', 'printed here');
+      expect(printed, hasLength(1));
+      expect(printed.single, endsWith(' I dart.test printed here'));
+      expect(forwarded.single, (printed.single, true));
+    });
+
+    test('leaves printing to native where native prints Dart lines', () {
+      Log.nativePrintsDart = true;
+      Log.i('test', 'printed by native');
+      expect(printed, isEmpty);
+      expect(forwarded, hasLength(1));
+      expect(forwarded.single.$1, endsWith(' I dart.test printed by native'));
+      expect(forwarded.single.$2, isFalse);
     });
   });
 

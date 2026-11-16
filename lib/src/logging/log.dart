@@ -12,8 +12,9 @@ export 'log_line.dart' show LogLevel, LogLine, peerHex;
 /// `LoggingSetup.init` has run, Dart lines are also printed (`flutter run`
 /// shows them; on Android they land in logcat under the `flutter` tag) and
 /// forwarded to the native logger, which writes them to the on-device log
-/// file next to its own lines. Until then (in tests, say) lines only go to
-/// [buffer].
+/// file next to its own lines. Where the native logger writes them to the
+/// console as well, they are not printed here (see [nativePrintsDart]).
+/// Until then (in tests, say) lines only go to [buffer].
 ///
 /// ```dart
 /// Log.i('bridge', 'start #3 mock=false');
@@ -31,9 +32,18 @@ abstract final class Log {
   /// Print Dart lines to the console. Off until `LoggingSetup.init`.
   static bool printToConsole = false;
 
-  /// Hands a formatted Dart line to the native log file. Set by
-  /// `LoggingSetup.init`.
-  static void Function(String line)? forwardToNative;
+  /// Hands a formatted Dart line to the native log file. `printed` says
+  /// whether it was printed here; when not, native writes it to its console
+  /// too. Set by `LoggingSetup.init`.
+  static void Function(String line, {required bool printed})? forwardToNative;
+
+  /// Native writes Dart's lines to the console, so they are not printed
+  /// here. True on an iOS device whose console is the app's stderr (under
+  /// `flutter run`, VS Code, Xcode's test runner); native says so in
+  /// `configure`. A `print` there waits for as long as nobody reads the
+  /// console, and the whole app stood still with it (seen on an iPad with
+  /// the console paused; docs/logging.md); native queues the line instead.
+  static bool nativePrintsDart = false;
 
   /// Also print native lines. Only where they would not reach the console
   /// otherwise (the iOS simulator); native says so in `configure`.
@@ -84,8 +94,9 @@ abstract final class Log {
       message: text.toString(),
     ).format();
     buffer.add(LogRecord(line, level, native: false));
-    if (printToConsole) debugPrint(line);
-    forwardToNative?.call(line);
+    final printed = printToConsole && !nativePrintsDart;
+    if (printed) debugPrint(line);
+    forwardToNative?.call(line, printed: printed);
   }
 
   /// Adds lines the native logger sent over its event channel. They are

@@ -15,6 +15,9 @@ import os
 ///   set, as `flutter run` on a device and Xcode's test runner do; otherwise
 ///   os_log (subsystem: the bundle id, category `BPB`), at `.default`
 ///   (`.error` for errors), the line carrying its own level letter.
+///   With a stderr console, Dart's lines go out here too (Dart then does
+///   not print them), and no caller ever waits for the console: see
+///   `ConsoleWriter`.
 /// - to the log file (Documents/logs/bridge.log), which also receives Dart's
 ///   lines, so it holds the whole run. The previous `keptFiles - 1` files are
 ///   kept (bridge.1.log is the previous launch, or the first part of this one
@@ -77,7 +80,8 @@ final class BridgeLog {
   /// its mirror copy would otherwise sit next to ours in any console that
   /// shows both (`flutter run -v` does). The cost is that Console.app and
   /// `log stream` do not see our lines during such a launch; the log file
-  /// has them all. Lines go out through a `ConsoleWriter`.
+  /// has them all. Lines go out through a `ConsoleWriter`, Dart's included
+  /// (`printsDartLines`).
   enum Console: Equatable {
     case osLog
     case standardError
@@ -104,13 +108,33 @@ final class BridgeLog {
     console == .osLog && simulator
   }
 
-  /// Writes lines to a file descriptor (stderr in the app). It has its own
-  /// lock, taken after the logger's lock is released, so a reader that
-  /// stops reading holds up only the threads writing to the console, never
-  /// the log file, Dart, or `isEnabled` callers.
+  /// Writes lines to a file descriptor (stderr in the app) from its own
+  /// serial queue, so no caller ever waits for whoever reads the console.
+  ///
+  /// A write to stderr waits while nobody reads it. Seen on an iPad
+  /// (iPad8,11, iOS 27.2.1, Flutter 3.47.9), 2026-11-16: under
+  /// `flutter run`, with the Mac's devicectl console process paused, the
+  /// app took about 1.2 MB of log lines and then stood still, Dart
+  /// included, for the 3 min 16 s until the process was resumed, when the
+  /// logger wrote to stderr on the calling thread. So a line is only
+  /// queued here. Up to `maxPendingBytes` wait for the reader; lines
+  /// beyond that are left out of the console (the log file has every
+  /// line) and counted, until the queue is down to half of that. The next
+  /// line is then preceded by a note saying how many are missing. A burst
+  /// that outruns a reader does the same: on the iPad, 2.4 MB logged within
+  /// a second left lines out although `flutter run` was reading.
   final class ConsoleWriter {
-    private let lock = NSLock()
+    /// About 1500 lines. A reader that keeps up never gets near it.
+    static let defaultMaxPendingBytes = 256 * 1024
+
     private let fd: Int32
+    private let maxPendingBytes: Int
+    private let queue = DispatchQueue(label: "bridge-log.console", qos: .utility)
+    // Guards the three below.
+    private let lock = NSLock()
+    private var pendingBytes = 0
+    private var skipping = false
+    private var skipped = 0
 
     /// Whether SIGPIPE is off for `fd`: a write after the reader closed a
     /// pipe then fails with EPIPE instead of raising SIGPIPE. The app
@@ -119,21 +143,68 @@ final class BridgeLog {
     /// case that changes.
     let sigpipeOff: Bool
 
-    init(fd: Int32) {
+    init(fd: Int32, maxPendingBytes: Int = ConsoleWriter.defaultMaxPendingBytes) {
       self.fd = fd
+      self.maxPendingBytes = maxPendingBytes
       sigpipeOff = fcntl(fd, F_SETNOSIGPIPE, 1) != -1
     }
 
-    /// One unbuffered write(2) per line, more only if the kernel takes part
-    /// of it; one line at a time, so lines from different threads do not
-    /// interleave. True when the whole line went out. Errors end the line:
-    /// it is in the log file anyway.
+    /// Queues one line; returns at once. False when the line was left out
+    /// because too much is already waiting for the reader.
     @discardableResult
-    func write(_ line: String) -> Bool {
-      let bytes = Array((line + "\n").utf8)
+    func write(_ line: String, now: @autoclosure () -> String = "") -> Bool {
+      var bytes = Array((line + "\n").utf8)
       lock.lock()
-      defer { lock.unlock() }
-      return bytes.withUnsafeBytes { buffer -> Bool in
+      // A line always fits an empty queue, whatever its size. Once lines
+      // are being left out, that goes on until half the queue is free, so
+      // the notes do not alternate with single lines.
+      if skipping && pendingBytes <= maxPendingBytes / 2 { skipping = false }
+      if !skipping && pendingBytes > 0 && pendingBytes + bytes.count > maxPendingBytes {
+        skipping = true
+      }
+      if skipping {
+        skipped += 1
+        lock.unlock()
+        return false
+      }
+      if skipped > 0 {
+        bytes.insert(contentsOf: Array(Self.skippedNote(skipped, time: now()).utf8), at: 0)
+        skipped = 0
+      }
+      pendingBytes += bytes.count
+      lock.unlock()
+      queue.async {
+        self.writeNow(bytes)
+        self.lock.lock()
+        self.pendingBytes -= bytes.count
+        self.lock.unlock()
+      }
+      return true
+    }
+
+    /// Waits until everything queued so far is written, for at most
+    /// `timeout` seconds. False when the reader did not take it in time.
+    @discardableResult
+    func flush(timeout: TimeInterval) -> Bool {
+      let done = DispatchSemaphore(value: 0)
+      queue.async { done.signal() }
+      return done.wait(timeout: .now() + timeout) == .success
+    }
+
+    /// The line that stands in for lines left out, in the log line format
+    /// so that tool/devlogs.dart keeps it when it merges a capture.
+    static func skippedNote(_ count: Int, time: String) -> String {
+      "\(time) W native.log [console] \(count) line(s) left out of this console, which was not "
+        + "taking them as fast as they were logged. The log file has them.\n"
+    }
+
+    /// One unbuffered write(2), more only if the kernel takes part of the
+    /// bytes. True when all of them went out. Errors end the write: the
+    /// line is in the log file anyway. Waits for the reader; only the
+    /// queue calls it (and the tests).
+    @discardableResult
+    func writeNow(_ bytes: [UInt8]) -> Bool {
+      bytes.withUnsafeBytes { buffer -> Bool in
         guard let base = buffer.baseAddress else { return false }
         var offset = 0
         while offset < buffer.count {
@@ -297,12 +368,11 @@ final class BridgeLog {
       pendingDropped += 1
     }
     let drain = scheduleDrainLocked()
-    let writer = consoleWriter
+    // Under the lock, so the console has the lines in the file's order.
+    // This only queues the line (see ConsoleWriter); nothing waits here.
+    consoleWriter?.write(line, now: self.formatter.string(from: Date()))
     lock.unlock()
     if drain { DispatchQueue.main.async { self.drain() } }
-    // After unlocking: see ConsoleWriter. Two threads' lines can reach the
-    // console in a different order than the file by a line; each is whole.
-    writer?.write(line)
     reportProblems()
   }
 
@@ -310,14 +380,37 @@ final class BridgeLog {
     log(level, component, { message })
   }
 
-  /// Appends lines Dart already formatted to the file. They are not sent to
-  /// the console (Dart printed them) or back to Dart.
-  static func writeFromDart(_ lines: [String]) {
+  /// Appends lines Dart already formatted to the file. They are not sent
+  /// back to Dart. `printed` says whether Dart printed them itself; when it
+  /// did not (see `printsDartLines`), they go to the console from here.
+  static func writeFromDart(_ lines: [String], printed: Bool = true) {
     let logger = shared
     logger.lock.lock()
-    lines.forEach(logger.write)
+    for line in lines {
+      logger.write(line)
+      if !printed {
+        logger.consoleWriter?.write(line, now: logger.formatter.string(from: Date()))
+      }
+    }
     logger.lock.unlock()
     logger.reportProblems()
+  }
+
+  /// Whether Dart should leave printing its lines to this logger: when the
+  /// console is the app's stderr. Dart's `print` waited there like our own
+  /// writes while nobody read the console (on the iPad, with the console
+  /// paused, the app stood still after 1500 printed lines of 1 KB); from
+  /// here the line is only queued.
+  static var printsDartLines: Bool { shared.console == .standardError }
+
+  /// Gives the console up to `timeout` seconds to take what is queued.
+  /// For the moments before the process ends.
+  static func flushConsole(timeout: TimeInterval) {
+    let logger = shared
+    logger.lock.lock()
+    let writer = logger.consoleWriter
+    logger.lock.unlock()
+    writer?.flush(timeout: timeout)
   }
 
   /// Logs (as errors, so they reach the console and Dart) the problems
@@ -507,6 +600,8 @@ final class BridgeLog {
       BridgeLog.e(
         "crash",
         "uncaught exception \(exception.name.rawValue): \(exception.reason ?? "")\n    \(stack)")
+      // The process is about to end; let the console have the line too.
+      BridgeLog.flushConsole(timeout: 0.5)
       previousExceptionHandler?(exception)
     }
   }

@@ -74,7 +74,9 @@ abstract final class LogMethods {
   /// with the log file path ([LogArgs.file]).
   static const String configure = 'configure';
 
-  /// Appends formatted Dart lines ([LogArgs.lines]) to the native log file.
+  /// Appends formatted Dart lines ([LogArgs.lines]) to the native log file,
+  /// and to the native console when Dart did not print them
+  /// ([LogArgs.printed]).
   static const String write = 'write';
 }
 
@@ -87,9 +89,19 @@ abstract final class LogArgs {
   static const String herald = 'herald';
 
   static const String lines = 'lines';
+
+  /// With [lines] in a `write` call: whether Dart printed them itself. When
+  /// false, native writes them to its console as well as to the file.
+  static const String printed = 'printed';
+
   static const String file = 'file';
 
   /// In the `configure` result: true when native lines do not reach the
   /// `flutter run` console on their own (iOS simulator), so Dart prints them.
   static const String echo = 'echo';
+
+  /// In the `configure` result: true when native writes Dart's lines to the
+  /// console itself (an iOS console read from stderr), so Dart must not
+  /// print them. Absent or false: Dart prints its own lines.
+  static const String printsDart = 'printsDart';
 }
