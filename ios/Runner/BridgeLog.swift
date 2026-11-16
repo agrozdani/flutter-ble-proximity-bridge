@@ -66,9 +66,11 @@ final class BridgeLog {
   /// - Xcode's test runner (tool/ios_ui_test.sh) sets
   ///   `OS_ACTIVITY_DT_MODE=YES`; 1 MB written to stderr there took 51 ms,
   ///   so it is read, and writing did not stall the app.
-  /// - The simulator under `flutter run` (`simctl launch`) and a device
-  ///   launch without a console (`devicectl device process launch`, as
-  ///   `flutter run --release` does) get no `OS_ACTIVITY_DT_MODE`.
+  /// - The simulator under `flutter run` (`simctl launch`), a device launch
+  ///   without a console (`devicectl device process launch`, as
+  ///   `flutter run --release` does) and a run started through Xcode's
+  ///   scripting `debug` command (flutter_tools' fallback when LLDB is off)
+  ///   get no `OS_ACTIVITY_DT_MODE`.
   ///
   /// With the variable set, os_log is skipped rather than written as well:
   /// its mirror copy would otherwise sit next to ours in any console that

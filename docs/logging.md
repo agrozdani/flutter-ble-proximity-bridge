@@ -69,11 +69,10 @@ sit next to the native lines of the calls they describe.
   `BPB` lines appear on their own. It learns the process id only once it
   connects to the Dart VM; the first few native lines of a launch (the log
   header) are in logcat and the file but not in `flutter run`.
-- iOS device, Xcode 26 or later, debug and (from the source; not run)
-  profile: the tool launches the
+- iOS device, Xcode 26 or later, debug and profile: the tool launches the
   app with `xcrun devicectl device process launch --console
-  --environment-variables {"OS_ACTIVITY_DT_MODE": "enable"}` (with
-  `--start-stopped` and then LLDB in debug) and prints what that console
+  --environment-variables {"OS_ACTIVITY_DT_MODE": "enable"}` (in debug also
+  `--start-stopped`, then LLDB attaches) and prints what that console
   outputs (`core_devices.dart`, `_launchAppCommand`). `OS_ACTIVITY_DT_MODE`
   mirrors every os_log message to the app's stderr, `.debug` included, as
   `<time> Runner[pid:tid] [BPB] <line>`. But the tool drops console lines
@@ -82,10 +81,20 @@ sit next to the native lines of the calls they describe.
   lines). That is why os_log lines never showed in `flutter run` on a
   device. So when `OS_ACTIVITY_DT_MODE` is set, the native logger writes
   each line to stderr as it is, instead of to os_log, and the tool shows it
-  once (see `BridgeLog.Console`). `flutter run --machine`, which IDEs run,
-  prints those lines as plain text exactly like Dart's `flutter:` lines,
-  and the Flutter debug adapter passes plain text through to the debug
-  console (`flutter_adapter.dart`, `handleStdout`).
+  once (see `BridgeLog.Console`).
+- VS Code: the Dart extension (3.146.0 checked) runs `flutter
+  debug_adapter` for Flutter apps, unless `dart.customFlutterDapPath` is
+  set. That adapter runs `flutter run --machine`, which prints native lines
+  as plain text like Dart's `flutter:` lines, and passes plain text on as
+  DAP `output` events (`flutter_adapter.dart`, `handleStdout`); the Debug
+  Console shows those.
+- If the tool cannot launch with LLDB, or `FLUTTER_LLDB_DEBUGGING=false`,
+  it has Xcode run the app instead, through Xcode's scripting `debug`
+  command (`bin/xcode_debug.js`; the Runner scheme sets no environment
+  variables). The app then gets no `OS_ACTIVITY_DT_MODE` and logs to os_log,
+  and `flutter run` shows Dart lines only. With
+  `--dart-define=LOG_ECHO_NATIVE=true` it showed each native line once
+  (as `flutter: ...`), launch header included.
 - iOS simulator: the tool launches with `simctl launch` (no console, no
   `OS_ACTIVITY_DT_MODE`) and only shows os_log messages from the app's main
   executable, and debug builds put the app's code in `Runner.debug.dylib`
@@ -102,7 +111,10 @@ simulator, 2026-11-16:
 
 | Launch | Console | Native lines shown |
 |---|---|---|
-| `flutter run` (debug) on the iPad | stderr | once each in `flutter run` and `--machine`, launch header included; also after a hot restart |
+| `flutter run` (debug) on the iPad | stderr | once each, launch header included; also after a hot restart |
+| `flutter run --profile` on the iPad | stderr | once each, launch header included |
+| `flutter debug_adapter` (what VS Code runs), debug, on the iPad | stderr | once each as DAP `output` events (`console` before the app starts, `stdout` after); also after a hot restart |
+| `flutter run` with `FLUTTER_LLDB_DEBUGGING=false` (Xcode runs the app) | os_log | not in `flutter run`, even with `-v`; once each with `LOG_ECHO_NATIVE=true` |
 | XCUITest profile build on the iPad | stderr | not shown by xcodebuild; the log file is complete |
 | `devicectl device process launch`, no console | os_log | nowhere live; in the log file |
 | `flutter run` on the simulator | os_log | once each, printed by Dart (`flutter: ...`) |
@@ -111,13 +123,21 @@ While the variable is set our lines are not in os_log, so Console.app and
 `log stream` do not see them; the log file has them all. Writing to stderr
 was not seen to stall the app: under Xcode's test runner 1 MB went out in
 51 ms, and after `flutter run` and its devicectl were killed (the app kept
-running), the app went on writing a 2 KB line every 5 s for the
-2 min 40 s it was watched. Not checked: launching from Xcode's Run button; the tool's
-fallback to Xcode automation when LLDB fails; the VS Code debug console
-itself (only the `--machine` output it reads).
+running), the app went on writing a 2 KB line every 5 s for the 2 min 40 s
+it was watched.
+
+Not seen, because this Mac gave no screen or accessibility access to read
+other apps' windows: what Xcode's console and VS Code's Debug Console
+panels display. The app's side (os_log under Xcode; one DAP `output` event
+per line for VS Code) is checked; the panels' rendering is not.
 
 `d` (detach) in `flutter run` does not leave the app running on this path:
 the tool's shutdown hook runs `devicectl device process terminate` on it.
+`flutter attach` to a debug app whose `flutter run` was killed found two
+advertised VM services and stopped ("There are multiple Dart VM Services
+available", then "connection to device ended too early"); with
+`--device-vmservice-port` it attached and hot-restarted the app, but showed
+none of the app's lines, Dart or native, though the log file has them.
 
 ## Levels and switches
 
@@ -128,7 +148,7 @@ switches (`flutter run --dart-define=NAME=value`):
 |---|---|---|
 | `LOG_LEVEL` | `debug` `info` `warn` `error` | `debug`; `info` in release |
 | `HERALD_LOG` | `off` `fault` `info` `debug` | `fault`; `off` in release |
-| `LOG_ECHO_NATIVE` | `true` | off; Dart echoes on its own only on the iOS simulator. Set it only for a console that shows no native lines: under `flutter run` on Android or an iOS device each native line would print twice |
+| `LOG_ECHO_NATIVE` | `true` | off; Dart echoes on its own only on the iOS simulator. Set it only for a console that shows no native lines (such as `flutter run` when Xcode runs the app, above): under a normal `flutter run` on Android or an iOS device each native line would print twice |
 
 Herald's own logging is separate from ours. It goes to logcat (tags like
 `Sensor::BLE.ConcreteBLEReceiver`) / os_log (subsystem `Sensor`), and to
