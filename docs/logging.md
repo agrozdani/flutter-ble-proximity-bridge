@@ -94,8 +94,11 @@ switches (`flutter run --dart-define=NAME=value`):
 
 Herald's own logging is separate from ours. It goes to logcat (tags like
 `Sensor::BLE.ConcreteBLEReceiver`) / os_log (subsystem `Sensor`), and to
-Herald's own `log.txt` (Android: `Android/media/<package>/log.txt`; iOS:
-`Documents/log.txt`), not to `bridge.log`. At `fault` it only logs what
+Herald's own `log.txt` (Android: `Android/media/<package>/Sensor/log.txt`; iOS:
+`Documents/log.txt`), not to `bridge.log`. Its Android file stamps lines in
+UTC, its iOS file in local time (seen side by side on a Pixel and an iPad:
+both files start at their Herald host's start, 5 hours apart on the
+Pixel). At `fault` it only logs what
 Herald treats as an error or an unexpected state (around 60 places in its
 iOS source); `debug` logs every scan, connection and read and is very
 verbose. Some faults are expected with this bridge: it reuses one Herald

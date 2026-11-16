@@ -360,38 +360,55 @@ File? _findFile(Directory dir, String name) {
 Future<List<String>> _pullAndroid(_Device device, Directory into) async {
   final adb = _adbPath()!;
   final found = <String>[];
+  String? lastError;
+  // `shell -T` (no terminal) rather than `exec-out`: exec-out reports exit
+  // code 0 and puts a command's errors on stdout, so a missing file came back
+  // as a file holding "cat: ...: No such file or directory". Without a
+  // terminal the bytes pass through unchanged, and with adb's shell protocol
+  // (device feature `shell_v2`) the command's exit code comes back and its
+  // errors stay on stderr. Without that protocol it is exec-out again.
+  final features = await Process.run(adb, ['-s', device.id, 'features']);
+  if (!'${features.stdout}'.split(RegExp(r'[,\s]+')).contains('shell_v2')) {
+    stdout.writeln(
+      '  warning: this device has no adb shell_v2, so a missing file can be '
+      'saved as its error message; check the pulled files',
+    );
+  }
   Future<bool> save(List<String> command, String name) async {
     final result = await Process.run(adb, [
       '-s',
       device.id,
+      'shell',
+      '-T',
       ...command,
     ], stdoutEncoding: null);
     final bytes = result.stdout as List<int>;
-    if (result.exitCode != 0 || bytes.isEmpty) return false;
+    if (result.exitCode != 0 || bytes.isEmpty) {
+      final error = '${result.stderr}'.trim();
+      if (error.isNotEmpty) lastError = error.split('\n').last;
+      return false;
+    }
     File('${into.path}/$name').writeAsBytesSync(bytes);
     found.add(name);
     return true;
   }
 
+  // A launch keeps the two before it, so on the first launches some of these
+  // don't exist yet.
   for (final name in logFiles) {
-    await save([
-      'exec-out',
-      'run-as',
-      androidPackage,
-      'cat',
-      'files/logs/$name',
-    ], name);
+    await save(['run-as', androidPackage, 'cat', 'files/logs/$name'], name);
   }
   if (found.isEmpty) {
     stdout.writeln(
-      '  run-as found no logs: is a debug build installed and has it run?',
+      '  run-as found no logs${lastError == null ? '' : ' ($lastError)'}: '
+      'is a debug build installed and has it run?',
     );
   }
-  // Herald's own log (when HERALD_LOG is on): getExternalMediaDirs().
+  // Herald's own log (when HERALD_LOG is on): Herald's TextFile writes to
+  // getExternalMediaDirs()[0]/Sensor/.
   await save([
-    'exec-out',
     'cat',
-    '/sdcard/Android/media/$androidPackage/log.txt',
+    '/sdcard/Android/media/$androidPackage/Sensor/log.txt',
   ], 'herald-log.txt');
   // Crashes Android recorded, for any app.
   await save(['logcat', '-d', '-b', 'crash'], 'logcat-crash.txt');
