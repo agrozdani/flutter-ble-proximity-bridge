@@ -443,15 +443,18 @@ same cases on both platforms:
   must produce its own platform's bytes exactly, and each decoder is run on
   the other platform's, so the Kotlin and Swift codecs are checked against
   each other rather than only against themselves. They also cover when the
-  payload revision changes, and the status hand-over to a rebuilt host's
+  payload revision changes (including revisions that set the flags byte's top
+  bit and the wrap to 0), and the status hand-over to a rebuilt host's
   supplier.
 - `FrameOverridesTest.kt` / `FrameOverridesTests` (Swift) cover which payload
   wins: a goodbye/hello frame over a cached payload until the next fresh read
   or its timeout (shorter for a goodbye from an iPhone), and the newest
-  revision over stale frames, reads and relayed copies.
+  revision over stale frames, reads and relayed copies. They also pin that only
+  frames and reads keep a revision remembered, and the periodic sweep.
 - `PayloadPipelineTest.kt` / `PayloadPipelineTests` (Swift) drive the pipeline
-  through Herald's own delegate callbacks: how each callback is classified,
-  the self-sighting guard, and recording while stopped.
+  through Herald's own delegate callbacks (on iOS through the `SensorDelegate`
+  protocol, as Herald calls them): how each callback is classified, the
+  self-sighting guard, and that frames and reads are recorded while stopped.
 
 ## Adapting it for your own app
 
@@ -463,9 +466,14 @@ address when building on it:
 - **Mint real session ids.** The demo hard-codes one shared `kDemoSessionId` so
   every install finds every other. A real app mints a UUID per
   room/group/pairing and distributes it out of band.
-- **Persist peer identity if required.** Peer ids are random per launch; persist
-  one if peers must be recognized across restarts. The bridge does not depend on
-  it.
+- **Persist peer identity if required, and the revision counter with it.** Peer
+  ids are random per launch; persist one if peers must be recognized across
+  restarts. The payload revision counter (`RevisionCounter` in
+  `StatusPayloadSupplier.kt` / `.swift`) starts again in every process, which
+  is only safe because the id changes with it. Under a persisted id, persist
+  the counter's last value too and continue from it: otherwise peers that
+  still remember the previous launch take the new one's payloads for older
+  ones and ignore them, its goodbye included, for up to about a minute.
 
 Deliberate non-goals, which mark the boundaries of the implementation: no state
 persistence, no retry/backoff beyond resume-retry, and no Pigeon (the channels

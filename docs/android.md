@@ -87,9 +87,11 @@ server), so `didReceive` never fires here: goodbye/hello frames from this
 device reach iOS peers only, and Android peers drop a stopped device by
 staleness eviction. `PayloadPipeline` runs `FrameOverrides` exactly as on
 iOS, but with no frames arriving it has no frame to apply here. Its
-revision check could still drop a stale read; in practice none arrives,
-since an Android receiver reads payloads straight from the peer and Herald
-never relays payloads to Android.
+revision check could still drop a stale read; with this app's per-launch
+peer ids none arrives in practice, since an Android receiver reads payloads
+straight from the peer and Herald never relays payloads to Android. (A peer
+id reused by a new process would look stale here too; see
+[What is deliberately not here](architecture.md#what-is-deliberately-not-here).)
 
 ## The pending-sink race
 
