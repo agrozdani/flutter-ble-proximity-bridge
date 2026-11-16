@@ -13,6 +13,7 @@ Files: `ios/Runner/`
 | `FrameOverrides.swift` | Decides which payload to believe: frames over cached copies, newest revision over stale ones |
 | `MonotonicClock.swift` | A clock that keeps counting while the device sleeps |
 | `MockPeerSource.swift` | Synthetic sightings for the simulator |
+| `BridgeLog.swift` | Logging: os_log, the on-device log file, lines for Dart ([logging.md](logging.md)) |
 
 ## Channel registration (scene-based template)
 
