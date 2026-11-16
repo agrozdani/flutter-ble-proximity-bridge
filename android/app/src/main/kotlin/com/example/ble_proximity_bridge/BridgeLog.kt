@@ -26,7 +26,8 @@ import java.util.Locale
  *
  * Each line goes:
  *  - to logcat under the tag [TAG]. `flutter run` shows it, since it prints
- *    every logcat line from the app's process;
+ *    every logcat line from the app's process. A stack trace goes out one
+ *    line per logcat entry, and a very long line in pieces ([logcatParts]);
  *  - to the log file (files/logs/bridge.log), which also receives Dart's
  *    lines, so it holds the whole run. The previous [KEPT_FILES] - 1 files
  *    are kept (bridge.1.log is the previous launch, or the first part of
@@ -60,6 +61,24 @@ object BridgeLog {
     private const val KEPT_FILES = 3
     private const val MAX_PENDING = 5_000
     private const val MAX_THREAD_NAME = 24
+
+    /**
+     * The longest piece handed to logcat in one entry. logd cuts an entry
+     * off at about 4 KB (seen on a Pixel Tablet, Android 17: of a
+     * 6086-character line, `flutter run` and logcat had the first 4062).
+     * The limit is in bytes; a Kotlin char is at most 3 bytes of UTF-8, or 4
+     * for a surrogate pair of two chars, so this many always fit.
+     */
+    internal const val LOGCAT_MAX_CHARS = 1300
+
+    /**
+     * What starts the second and later pieces of a line cut for logcat: an
+     * indent, so that they read like a stack trace's lines, and "…", so
+     * that tool/devlogs.dart can tell them from one and join them back onto
+     * their line (a line in a capture then matches the same line in the log
+     * file). Its 7 bytes leave each piece well inside logd's limit.
+     */
+    internal const val LOGCAT_PIECE_PREFIX = "    \u2026"
 
     /** Lines below this level are dropped; set from Dart (`configure`). */
     @Volatile
@@ -153,10 +172,32 @@ object BridgeLog {
         }
         val line = "${timeFormat.get()!!.format(Date())} ${level.letter} native.$component " +
             "[${threadName()}] $text"
-        Log.println(level.priority, TAG, line)
+        val parts = logcatParts(line)
         synchronized(lock) {
+            // Under the lock, so that another thread's line cannot land
+            // between the lines of a stack trace, and logcat has the lines
+            // in the file's order. Nothing waits here: liblog writes to logd
+            // on a non-blocking socket and drops the entry when logd is
+            // overloaded (AOSP main, system/logging/liblog/logd_writer.cpp).
+            for (part in parts) Log.println(level.priority, TAG, part)
             writeLine(line)
             queueForDart(line)
+        }
+    }
+
+    /**
+     * [line] as the entries it is sent to logcat in: one per line of a
+     * multi-line message (logcat prints them that way in any case), and a
+     * line longer than [LOGCAT_MAX_CHARS] in pieces, the later ones starting
+     * with [LOGCAT_PIECE_PREFIX]. The log file and Dart get the line whole.
+     */
+    internal fun logcatParts(line: String): List<String> = line.split('\n').flatMap { part ->
+        if (part.length <= LOGCAT_MAX_CHARS) {
+            listOf(part)
+        } else {
+            part.chunked(LOGCAT_MAX_CHARS).mapIndexed { index, piece ->
+                if (index == 0) piece else "$LOGCAT_PIECE_PREFIX$piece"
+            }
         }
     }
 

@@ -812,14 +812,41 @@ class BridgeLogConsoleWriterTests: XCTestCase {
     _ = fcntl(writeEnd, F_SETFL, flags)
   }
 
+  /// Empties the pipe after `seconds`, unless cancelled first. A test that
+  /// leaves the pipe full sets this up, so that a writer which waits for
+  /// the reader on the test's own thread (the bug those tests guard
+  /// against) makes the test fail instead of hang.
+  private func unstickPipe(after seconds: Double) -> DispatchWorkItem {
+    let readFd = readEnd
+    let watchdog = DispatchWorkItem {
+      var buffer = [UInt8](repeating: 0, count: 65_536)
+      let flags = fcntl(readFd, F_GETFL)
+      _ = fcntl(readFd, F_SETFL, flags | O_NONBLOCK)
+      while read(readFd, &buffer, buffer.count) > 0 {}
+      _ = fcntl(readFd, F_SETFL, flags)
+    }
+    DispatchQueue.global().asyncAfter(deadline: .now() + seconds, execute: watchdog)
+    return watchdog
+  }
+
   func testWritesOneWholeLine() {
     let writer = BridgeLog.ConsoleWriter(fd: writeEnd)
     XCTAssertTrue(writer.write("2026-11-16 10:15:03.123 I native.test [main] hello"))
+    XCTAssertTrue(writer.flush(timeout: 5))
     XCTAssertEqual(readAvailable(), "2026-11-16 10:15:03.123 I native.test [main] hello\n")
   }
 
+  func testLinesArriveInTheOrderTheyWereWritten() {
+    let writer = BridgeLog.ConsoleWriter(fd: writeEnd)
+    let lines = (0..<200).map { "line \($0)" }
+    lines.forEach { writer.write($0) }
+    XCTAssertTrue(writer.flush(timeout: 5))
+    XCTAssertEqual(readAvailable(), lines.joined(separator: "\n") + "\n")
+  }
+
   func testALineLargerThanThePipeArrivesWhole() {
-    // 1 MB is far over a pipe's buffer, so write(2) takes it in parts.
+    // 1 MB is far over a pipe's buffer, so write(2) takes it in parts. It is
+    // also over the writer's backlog, which a line always fits when empty.
     let line = String(repeating: "y", count: 1_000_000)
     let writer = BridgeLog.ConsoleWriter(fd: writeEnd)
     var received = Data()
@@ -849,67 +876,122 @@ class BridgeLogConsoleWriterTests: XCTestCase {
     XCTAssertEqual(fcntl(writeEnd, F_GETNOSIGPIPE), 1)
     close(readEnd)
     pipeFds[0] = -1
-    XCTAssertFalse(writer.write("nobody reads this"))
+    XCTAssertFalse(writer.writeNow(Array("nobody reads this\n".utf8)))
+    // Queued lines fail the same way, and the queue moves on.
+    writer.write("nor this")
+    XCTAssertTrue(writer.flush(timeout: 5))
   }
 
-  func testAStuckConsoleDoesNotHoldUpTheLogger() {
+  /// A console nobody reads (seen on an iPad: `flutter run` with the Mac's
+  /// devicectl paused) must not make a log call wait, on any thread. When
+  /// the logger wrote to stderr on the calling thread, the app's main thread
+  /// stopped at its next log line for as long as the reader was away.
+  func testALogCallNeverWaitsForAStuckConsole() {
     fillPipe()
-    let previous = BridgeLog.shared.replaceConsoleWriterForTesting(
-      BridgeLog.ConsoleWriter(fd: writeEnd))
+    let writer = BridgeLog.ConsoleWriter(fd: writeEnd)
+    let previous = BridgeLog.shared.replaceConsoleWriterForTesting(writer)
     defer { _ = BridgeLog.shared.replaceConsoleWriterForTesting(previous) }
 
-    // If the logger did hold its lock while writing (the bug this test
-    // guards against), the main thread would block too, in the Dart drain;
-    // this unsticks the pipe after 3 s so the test fails instead of hanging.
-    let readFd = readEnd
-    let watchdog = DispatchWorkItem {
-      var buffer = [UInt8](repeating: 0, count: 65_536)
-      let flags = fcntl(readFd, F_GETFL)
-      _ = fcntl(readFd, F_SETFL, flags | O_NONBLOCK)
-      while read(readFd, &buffer, buffer.count) > 0 {}
-      _ = fcntl(readFd, F_SETFL, flags)
-    }
-    DispatchQueue.global().asyncAfter(deadline: .now() + 3, execute: watchdog)
-    defer { watchdog.cancel() }
+    let watchdog = unstickPipe(after: 5)
 
-    let logged = expectation(description: "the blocked log call returns")
-    DispatchQueue.global().async {
-      BridgeLog.w("test", "blocked on a full console")
-      logged.fulfill()
-    }
-    // Give that call time to reach the full pipe and block there.
-    Thread.sleep(forTimeInterval: 0.5)
-
-    // Other logger work goes on meanwhile, well before the watchdog.
     let start = Date()
-    let others = expectation(description: "other logger calls")
-    DispatchQueue.global().async {
-      _ = BridgeLog.isEnabled(.info)
-      _ = BridgeLog.heraldLevel
-      BridgeLog.writeFromDart(["2026-11-16 10:15:03.123 I dart.test unaffected"])
-      others.fulfill()
-    }
-    wait(for: [others], timeout: 5)
-    XCTAssertLessThan(Date().timeIntervalSince(start), 1, "other logger calls waited")
+    XCTAssertTrue(Thread.isMainThread)
+    for index in 0..<200 { BridgeLog.w("test", "console is stuck \(index)") }
+    BridgeLog.writeFromDart(["2026-11-16 10:15:03.123 I dart.test stuck too"], printed: false)
+    _ = BridgeLog.isEnabled(.info)
+    XCTAssertLessThan(Date().timeIntervalSince(start), 1, "a log call waited for the console")
+    // Nothing got out: the first line is still waiting for the reader.
+    XCTAssertFalse(writer.flush(timeout: 0.2))
 
-    // Reading the pipe lets the blocked line out.
+    // Once the reader is back, the lines follow, in order.
     watchdog.cancel()
-    let drained = readAvailable()
-    wait(for: [logged], timeout: 5)
+    var output = readAvailable()
+    XCTAssertTrue(writer.flush(timeout: 5))
+    output += readAvailable()
+    XCTAssertTrue(output.contains("W native.test [main] console is stuck 0\n"), "first line")
+    XCTAssertTrue(output.contains("W native.test [main] console is stuck 199\n"), "last line")
+    XCTAssertTrue(output.contains("I dart.test stuck too\n"), "Dart's line")
+    let first = output.range(of: "console is stuck 0\n")!
+    let last = output.range(of: "console is stuck 199\n")!
+    XCTAssertTrue(first.lowerBound < last.lowerBound)
+  }
+
+  func testLinesBeyondTheBacklogAreLeftOutAndCounted() {
+    fillPipe()
+    let waiting = "the one line that waits for the reader"
+    let writer = BridgeLog.ConsoleWriter(fd: writeEnd, maxPendingBytes: waiting.utf8.count + 10)
+    let watchdog = unstickPipe(after: 5)
+    XCTAssertTrue(writer.write(waiting))
+    XCTAssertFalse(writer.write("left out 1"))
+    XCTAssertFalse(writer.write("left out 2"))
+    XCTAssertFalse(writer.write("left out 3"))
+
+    watchdog.cancel()
+    var output = readAvailable()
+    XCTAssertTrue(writer.flush(timeout: 5))
+    XCTAssertTrue(writer.write("after the reader came back", now: "2026-11-16 10:15:03.123"))
+    XCTAssertTrue(writer.flush(timeout: 5))
+    output += readAvailable()
+
+    XCTAssertFalse(output.contains("left out 1"), output)
     XCTAssertTrue(
-      (drained + readAvailable()).contains("W native.test"),
-      "the blocked line reached the console")
+      output.hasSuffix(
+        waiting + "\n"
+          + "2026-11-16 10:15:03.123 W native.log [console] 3 line(s) left out of this console, "
+          + "which was not taking them as fast as they were logged. The log file has them.\n"
+          + "after the reader came back\n"),
+      String(output.suffix(400)))
+    // The note is said once.
+    XCTAssertTrue(writer.write("and one more"))
+    XCTAssertTrue(writer.flush(timeout: 5))
+    XCTAssertEqual(readAvailable(), "and one more\n")
+  }
+
+  func testOnceLinesAreLeftOutThatGoesOnUntilHalfTheBacklogIsFree() {
+    fillPipe()
+    let line = String(repeating: "a", count: 99)  // 100 bytes with its newline
+    let writer = BridgeLog.ConsoleWriter(fd: writeEnd, maxPendingBytes: 1000)
+    let watchdog = unstickPipe(after: 5)
+    for _ in 0..<9 { XCTAssertTrue(writer.write(line)) }
+    XCTAssertFalse(writer.write(line + line), "200 bytes do not fit the 100 left")
+    // A short line would fit the 100 bytes left, but it is left out too
+    // while more than half the backlog is waiting.
+    XCTAssertFalse(writer.write("b"))
+
+    watchdog.cancel()
+    _ = readAvailable()
+    XCTAssertTrue(writer.flush(timeout: 5))
+    _ = readAvailable()
+    XCTAssertTrue(writer.write("c", now: "T"))
+    XCTAssertTrue(writer.flush(timeout: 5))
+    XCTAssertTrue(readAvailable().hasPrefix("T W native.log [console] 2 line(s) left out"))
+  }
+
+  func testDartLinesGoToTheConsoleOnlyWhenDartDidNotPrintThem() {
+    let writer = BridgeLog.ConsoleWriter(fd: writeEnd)
+    let previous = BridgeLog.shared.replaceConsoleWriterForTesting(writer)
+    defer { _ = BridgeLog.shared.replaceConsoleWriterForTesting(previous) }
+
+    BridgeLog.writeFromDart(["2026-11-16 10:15:03.123 I dart.test printed by Dart"], printed: true)
+    BridgeLog.writeFromDart(
+      ["2026-11-16 10:15:03.124 W dart.test left to native\n    #0 main (file.dart:1)"],
+      printed: false)
+    XCTAssertTrue(writer.flush(timeout: 5))
+    XCTAssertEqual(
+      readAvailable(),
+      "2026-11-16 10:15:03.124 W dart.test left to native\n    #0 main (file.dart:1)\n")
   }
 
   func testAFailedLogFileIsReportedOnTheConsole() {
-    let previous = BridgeLog.shared.replaceConsoleWriterForTesting(
-      BridgeLog.ConsoleWriter(fd: writeEnd))
+    let writer = BridgeLog.ConsoleWriter(fd: writeEnd)
+    let previous = BridgeLog.shared.replaceConsoleWriterForTesting(writer)
     defer {
       BridgeLog.shared.reopenLogFileForTesting()
       _ = BridgeLog.shared.replaceConsoleWriterForTesting(previous)
     }
     BridgeLog.shared.breakLogFileForTesting()
     BridgeLog.i("test", "this write fails")
+    XCTAssertTrue(writer.flush(timeout: 5))
 
     let output = readAvailable()
     XCTAssertTrue(output.contains("I native.test"), output)

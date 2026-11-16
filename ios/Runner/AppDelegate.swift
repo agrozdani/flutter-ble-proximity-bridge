@@ -31,8 +31,10 @@ import UIKit
   private let logLevelArg = "level"
   private let logHeraldArg = "herald"
   private let logLinesArg = "lines"
+  private let logPrintedArg = "printed"
   private let logFileKey = "file"
   private let logEchoKey = "echo"
+  private let logPrintsDartKey = "printsDart"
 
   // MARK: - Engine setup
 
@@ -89,7 +91,10 @@ import UIKit
       let args = call.arguments as? [String: Any]
       switch call.method {
       case self.logWriteMethod:
-        BridgeLog.writeFromDart(args?[self.logLinesArg] as? [String] ?? [])
+        // Absent (an older Dart side): Dart printed them.
+        BridgeLog.writeFromDart(
+          args?[self.logLinesArg] as? [String] ?? [],
+          printed: args?[self.logPrintedArg] as? Bool ?? true)
         result(nil)
       case self.logConfigureMethod:
         let herald = (args?[self.logHeraldArg] as? String).flatMap(SensorLoggerLevel.init(rawValue:))
@@ -98,6 +103,7 @@ import UIKit
         result([
           self.logFileKey: BridgeLog.shared.currentFile?.path as Any,
           self.logEchoKey: BridgeLog.dartShouldEcho,
+          self.logPrintsDartKey: BridgeLog.printsDartLines,
         ])
       default:
         result(FlutterMethodNotImplemented)

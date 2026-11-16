@@ -48,12 +48,14 @@ abstract final class LoggingSetup {
         : (kReleaseMode ? 'off' : 'fault');
 
     Log.printToConsole = true;
-    Log.forwardToNative = (line) {
+    Log.forwardToNative = (line, {required printed}) {
       // Sent at once, not batched: a message reaches native before any
       // method call Dart makes after logging it, so the file keeps the two
-      // sides in order. Failures are ignored; the line was printed anyway.
+      // sides in order. Failures are ignored; the line is in the buffer,
+      // and was printed unless native prints Dart's lines.
       _methods.invokeMethod<void>(LogMethods.write, {
         LogArgs.lines: [line],
+        LogArgs.printed: printed,
       }).ignore();
     };
 
@@ -91,6 +93,9 @@ abstract final class LoggingSetup {
         {LogArgs.level: Log.minLevel.name, LogArgs.herald: herald},
       );
       nativeLogFile = info?[LogArgs.file] as String?;
+      // From here on native writes Dart's lines to the console; the lines
+      // logged before this answer were printed here, and said so.
+      Log.nativePrintsDart = info?[LogArgs.printsDart] == true;
       Log.echoNative = _echoDefine || info?[LogArgs.echo] == true;
       if (Log.echoNative) {
         // Native lines that arrived before this answer did.
@@ -101,7 +106,8 @@ abstract final class LoggingSetup {
       Log.i(
         'log',
         'native log file: $nativeLogFile'
-            '${Log.echoNative ? ' (native lines are echoed here)' : ''}',
+            '${Log.echoNative ? ' (native lines are echoed here)' : ''}'
+            '${Log.nativePrintsDart ? ' (native prints Dart lines)' : ''}',
       );
     } on Object catch (error) {
       // No native logger (e.g. a platform this demo does not build for).

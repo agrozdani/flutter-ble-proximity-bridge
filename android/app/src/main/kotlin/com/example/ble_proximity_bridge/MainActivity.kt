@@ -121,7 +121,9 @@ class MainActivity : FlutterActivity() {
                 }
                 BridgeLog.configure(level, herald)
                 // flutter run already shows every logcat line from the app's
-                // process, so Dart must not print native lines again.
+                // process, so Dart must not print native lines again. Dart
+                // prints its own lines here (no `printsDart` in the answer):
+                // they go to logcat, which never makes the writer wait.
                 result.success(
                     mapOf(LOG_ARG_FILE to BridgeLog.currentFile?.absolutePath, LOG_ARG_ECHO to false),
                 )
