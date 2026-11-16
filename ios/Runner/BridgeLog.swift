@@ -68,9 +68,10 @@ final class BridgeLog {
   ///   so it is read, and writing did not stall the app.
   /// - The simulator under `flutter run` (`simctl launch`), a device launch
   ///   without a console (`devicectl device process launch`, as
-  ///   `flutter run --release` does) and a run started through Xcode's
-  ///   scripting `debug` command (flutter_tools' fallback when LLDB is off)
-  ///   get no `OS_ACTIVITY_DT_MODE`.
+  ///   `flutter run --release` does) and a run from Xcode (its Run button,
+  ///   or its scripting `debug` command, flutter_tools' fallback when LLDB
+  ///   is off) get no `OS_ACTIVITY_DT_MODE`. Xcode's console showed each
+  ///   os_log line once.
   ///
   /// With the variable set, os_log is skipped rather than written as well:
   /// its mirror copy would otherwise sit next to ours in any console that

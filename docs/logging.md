@@ -115,6 +115,7 @@ simulator, 2026-11-16:
 | `flutter run --profile` on the iPad | stderr | once each, launch header included |
 | `flutter debug_adapter` (what VS Code runs), debug, on the iPad | stderr | once each as DAP `output` events (`console` before the app starts, `stdout` after); also after a hot restart |
 | VS Code, F5, debug, on the iPad | stderr | once each in the Debug Console, launch header included |
+| Xcode's Run button, debug, on the iPad | os_log | once each in Xcode's console, launch header included |
 | `flutter run` with `FLUTTER_LLDB_DEBUGGING=false` (Xcode runs the app) | os_log | not in `flutter run`, even with `-v`; once each with `LOG_ECHO_NATIVE=true` |
 | XCUITest profile build on the iPad | stderr | not shown by xcodebuild; the log file is complete |
 | `devicectl device process launch`, no console | os_log | nowhere live; in the log file |
@@ -129,9 +130,10 @@ it was watched.
 
 VS Code's Debug Console (F5 on the iPad, debug, 2026-11-16) showed each
 native line once without a `flutter:` prefix, from the launch header and
-`console stderr (OS_ACTIVITY_DT_MODE=enable)` on. Not seen: what Xcode's
-console shows when Xcode's Run button starts the app; the app's side under
-flutter_tools' scripted Xcode run is os_log, above.
+`console stderr (OS_ACTIVITY_DT_MODE=enable)` on. Xcode's Run button
+(debug, on the iPad, same day) gave the app no `OS_ACTIVITY_DT_MODE`: it
+logged `console os_log`, and Xcode's console showed each native line once,
+as an os_log entry (category `BPB`, library `Runner.debug.dylib`).
 
 `d` (detach) in `flutter run` does not leave the app running on this path:
 the tool's shutdown hook runs `devicectl device process terminate` on it.
