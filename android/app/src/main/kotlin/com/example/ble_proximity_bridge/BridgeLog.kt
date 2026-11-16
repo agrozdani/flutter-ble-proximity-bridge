@@ -71,6 +71,15 @@ object BridgeLog {
      */
     internal const val LOGCAT_MAX_CHARS = 1300
 
+    /**
+     * What starts the second and later pieces of a line cut for logcat: an
+     * indent, so that they read like a stack trace's lines, and "…", so
+     * that tool/devlogs.dart can tell them from one and join them back onto
+     * their line (a line in a capture then matches the same line in the log
+     * file). Its 7 bytes leave each piece well inside logd's limit.
+     */
+    internal const val LOGCAT_PIECE_PREFIX = "    \u2026"
+
     /** Lines below this level are dropped; set from Dart (`configure`). */
     @Volatile
     var minLevel = Level.DEBUG
@@ -179,16 +188,15 @@ object BridgeLog {
     /**
      * [line] as the entries it is sent to logcat in: one per line of a
      * multi-line message (logcat prints them that way in any case), and a
-     * line longer than [LOGCAT_MAX_CHARS] in pieces, the later ones indented
-     * like a stack trace's lines so that tool/devlogs.dart keeps them with
-     * the entry. The log file and Dart get the line whole.
+     * line longer than [LOGCAT_MAX_CHARS] in pieces, the later ones starting
+     * with [LOGCAT_PIECE_PREFIX]. The log file and Dart get the line whole.
      */
     internal fun logcatParts(line: String): List<String> = line.split('\n').flatMap { part ->
         if (part.length <= LOGCAT_MAX_CHARS) {
             listOf(part)
         } else {
             part.chunked(LOGCAT_MAX_CHARS).mapIndexed { index, piece ->
-                if (index == 0) piece else "    $piece"
+                if (index == 0) piece else "$LOGCAT_PIECE_PREFIX$piece"
             }
         }
     }

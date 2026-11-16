@@ -559,11 +559,33 @@ Future<void> _mergeCommand(_Options options) async {
 class _Entry {
   _Entry(this.line, this.label, this.order);
 
-  final LogLine line;
+  LogLine line;
   final String label;
   final int order;
   final List<String> continuation = [];
+
+  /// Joins a later piece of a long logcat line ([_logcatPiece]) back onto
+  /// the line it was cut from: the entry's own line, or its last stack
+  /// trace line.
+  void appendPiece(String piece) {
+    if (continuation.isEmpty) {
+      line = LogLine(
+        time: line.time,
+        level: line.level,
+        origin: line.origin,
+        component: line.component,
+        message: line.message + piece,
+      );
+    } else {
+      continuation.last += piece;
+    }
+  }
 }
+
+/// What starts the later pieces of a line the Android logger cut for
+/// logcat (`BridgeLog.LOGCAT_PIECE_PREFIX`); a stack trace line has only the
+/// indent.
+const String _logcatPiece = '    \u2026';
 
 /// What a capture tool puts in front of a line: logcat as `flutter run`
 /// prints it (`I/BPB ( 123): `, `05-01 10:00:00.000 I/flutter ( 123): `),
@@ -595,37 +617,51 @@ void mergeLogs(List<(String, String)> inputs, LogLevel level, StringSink out) {
     if (!file.existsSync()) throw _ToolError('no such file: $path');
     var count = 0;
     final seenHere = <String, int>{};
+    // The entry being read: its first line and the lines that follow it.
     _Entry? current;
-    for (final raw in LineSplitter.split(file.readAsStringSync())) {
-      final line = LogLine.find(raw);
-      if (line == null) {
-        // A stack trace line belongs to the entry above it.
-        final body = raw.replaceFirst(_capturePrefix, '');
-        if (current != null && body.startsWith(RegExp(r'\s'))) {
-          current.continuation.add(body);
-        }
-        continue;
-      }
-      // The same line from a capture and from the pulled file of one
-      // device: keep one. A line that one file holds twice (the same
-      // event twice within a millisecond) is two lines, so count: this
-      // file's nth copy is new only if no earlier file had n of them.
-      final key = '$label ${line.format()}';
+
+    // Keeps [current] unless an earlier file of this device had it. The
+    // same line from a capture and from the pulled file of one device:
+    // keep one. A line that one file holds twice (the same event twice
+    // within a millisecond) is two lines, so count: this file's nth copy
+    // is new only if no earlier file had n of them. Done once the entry is
+    // complete, so that a line logcat had in pieces compares whole.
+    void finish() {
+      final entry = current;
+      current = null;
+      if (entry == null) return;
+      final key = '$label ${entry.line.format()}';
       final nth = seenHere.update(key, (n) => n + 1, ifAbsent: () => 1);
-      if (nth <= (kept[key] ?? 0)) {
-        current = null;
-        continue;
-      }
+      if (nth <= (kept[key] ?? 0)) return;
       kept[key] = nth;
       for (final match in RegExp(
         r'self=([0-9A-F]{8,16})\b',
-      ).allMatches(line.message)) {
+      ).allMatches(entry.line.message)) {
         selfIds[match.group(1)!] = label;
       }
-      current = _Entry(line, label, order++);
-      entries.add(current);
+      entries.add(entry);
       count++;
     }
+
+    for (final raw in LineSplitter.split(file.readAsStringSync())) {
+      final line = LogLine.find(raw);
+      if (line == null) {
+        // A stack trace line, or the next piece of a long line, belongs to
+        // the entry above it.
+        final entry = current;
+        final body = raw.replaceFirst(_capturePrefix, '');
+        if (entry == null) continue;
+        if (body.startsWith(_logcatPiece)) {
+          entry.appendPiece(body.substring(_logcatPiece.length));
+        } else if (body.startsWith(RegExp(r'\s'))) {
+          entry.continuation.add(body);
+        }
+        continue;
+      }
+      finish();
+      current = _Entry(line, label, order++);
+    }
+    finish();
     summaries.add('$label: $count new lines from $path');
   }
 

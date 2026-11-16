@@ -29,10 +29,13 @@ class BridgeLogTest {
 
         assertTrue(parts.size > 1)
         assertTrue(parts.first().startsWith(head))
-        assertTrue(parts.drop(1).all { it.startsWith("    ") })
+        assertTrue(parts.drop(1).all { it.startsWith(BridgeLog.LOGCAT_PIECE_PREFIX) })
         assertTrue(parts.last().endsWith(" self=00000001 mock=false"))
-        // Nothing is lost: without the indents, the pieces are the line.
-        assertEquals(line, parts.first() + parts.drop(1).joinToString("") { it.removePrefix("    ") })
+        // Nothing is lost: without their prefix, the pieces are the line.
+        assertEquals(
+            line,
+            parts.first() + parts.drop(1).joinToString("") { it.removePrefix(BridgeLog.LOGCAT_PIECE_PREFIX) },
+        )
         // Each fits an entry even if every char takes 3 bytes of UTF-8.
         val limitBytes = 4000
         assertTrue(parts.all { it.length * 3 <= limitBytes + 12 })

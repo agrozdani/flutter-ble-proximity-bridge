@@ -75,8 +75,10 @@ sit next to the native lines of the calls they describe.
   an entry off at about 4 KB (on a Pixel Tablet, Android 17, `flutter run`
   had the first 4062 characters of a 6086-character line), so the native
   logger sends a stack trace one line per entry and a longer line in
-  pieces of 1300 characters, the later ones indented; `flutter run` then
-  showed that line whole, in five pieces. The log file and the in-app
+  pieces of 1300 characters, the later ones starting with an indent and
+  `…`; `flutter run` then showed that line whole, in five pieces.
+  `tool/devlogs.dart merge` joins such pieces back into one line, so the
+  line in a capture matches the same line in the log file. The log file and the in-app
   viewer hold it as one line.
 - iOS device (iOS 17 or later), Xcode 26 or later, debug and profile: the
   tool launches the app with `xcrun devicectl device process launch

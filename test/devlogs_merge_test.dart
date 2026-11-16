@@ -118,6 +118,63 @@ void main() {
     expect(merged, hasLength(4));
   });
 
+  group('a line logcat had in pieces', () {
+    // As BridgeLog.logcatParts cuts it: 1300 characters, the later pieces
+    // after "    \u2026".
+    final long =
+        '2026-11-16 10:15:03.124 I native.method [main] start ${'x' * 3000} '
+        'self=0B5EAFE7';
+    List<String> pieces(String line) => [
+      for (var i = 0; i < line.length; i += 1300)
+        '${i == 0 ? '' : '    \u2026'}'
+            '${line.substring(i, (i + 1300).clamp(0, line.length))}',
+    ];
+    String logcat(String piece) =>
+        '11-16 10:15:03.124  4321  4321 I BPB     : $piece';
+
+    test('is joined back into one line', () {
+      final merged = merge([
+        (
+          'pixel',
+          file('run.log', [
+            for (final p in pieces(long)) 'I/BPB     ( 4321): $p',
+          ]),
+        ),
+      ]);
+      expect(merged, hasLength(1));
+      expect(merged.single, endsWith(long.substring(24)));
+    });
+
+    test('is kept once with the same line from the pulled file', () {
+      final merged = merge([
+        ('pixel', file('pixel.log', [long, stopped])),
+        (
+          'pixel',
+          file('capture.log', [...pieces(long).map(logcat), logcat(stopped)]),
+        ),
+      ]);
+      expect(merged, hasLength(2));
+      expect(merged.first, endsWith(long.substring(24)));
+    });
+
+    test('in a stack trace joins the trace line it was cut from', () {
+      final longFrame = '    \tat com.example.${'Foo' * 600}.bar(Foo.kt:1)';
+      final merged = merge([
+        (
+          'pixel',
+          file('capture.log', [
+            logcat(failed),
+            ...pieces(longFrame).map(logcat),
+            logcat(frame),
+          ]),
+        ),
+      ]);
+      expect(merged, hasLength(3));
+      expect(merged[1], endsWith(longFrame));
+      expect(merged[2], endsWith(frame));
+    });
+  });
+
   test('the same line twice in one file is two lines', () {
     const sighting =
         '2026-11-16 10:15:03.123 D native.emit [main] peer 0B5EAFE7 st=1 '
