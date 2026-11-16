@@ -45,7 +45,7 @@ native unit tests.
 | | Dart lines | Native lines |
 |---|---|---|
 | Console | printed (`flutter run` shows them; logcat tag `flutter` on Android) | logcat tag `BPB` (Android) / os_log category `BPB` (iOS) |
-| `flutter run` | yes | yes on Android and on iOS devices; on the iOS simulator Dart echoes them (below) |
+| `flutter run` | yes | yes on Android; on an iPhone/iPad only with `LOG_ECHO_NATIVE=true` (seen on an iPad, below); on the iOS simulator Dart echoes them (below) |
 | Log file on the device | yes (sent to native) | yes |
 | In-app viewer | yes | yes (sent to Dart) |
 
@@ -72,9 +72,13 @@ sit next to the native lines of the calls they describe.
 - iOS device, Xcode 26 or later: the tool launches the app with
   `devicectl --console` and `OS_ACTIVITY_DT_MODE`, which mirrors os_log to
   the console. Native lines are logged at the default level because that
-  mirror leaves out `.debug` messages (checked on macOS). **Not yet seen on
-  a physical device**; if native lines are missing there, run with
-  `--dart-define=LOG_ECHO_NATIVE=true`.
+  mirror leaves out `.debug` messages (checked on macOS). **On a physical
+  iPad they did not show** (iPad8,11, iOS 27.2.1, Xcode 27.2, Flutter
+  3.47.9, 2026-11-16): `native.log configured` was written to the log file
+  while `flutter run` was attached and printing Dart lines, but never
+  reached its output. Why the mirror missed them there is not established.
+  Run with `--dart-define=LOG_ECHO_NATIVE=true` on devices: with it, all
+  native lines appeared, including the launch header.
 - iOS simulator: the tool only shows os_log messages from the app's main
   executable, and debug builds put the app's code in `Runner.debug.dylib`
   (checked: the lines are in the simulator's log, sent from that dylib). So
