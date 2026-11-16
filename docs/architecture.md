@@ -274,7 +274,7 @@ Three safety nets, in order of speed:
 |---|---|---|
 | Goodbye/hello frame | iOS receivers the stopping device is connected to (the ghost case) | instant |
 | Offline flag in payload re-reads | Peers still connected when they re-read (a stopped iPhone keeps answering reads) | ≤ ~15 s (`payloadDataUpdateTimeInterval`) |
-| Dart staleness eviction | Everyone else: Android receivers, and peers that crashed or walked away | 20 s threshold, swept every 5 s |
+| Dart staleness eviction | Everyone else: Android receivers, and peers that crashed or walked away | 20 s on iOS, 90 s on Android ([why](android.md#herald-listens-in-bursts)), swept every 5 s |
 
 ## Lifecycle
 
@@ -287,7 +287,12 @@ Three safety nets, in order of speed:
   peer state → idle. Teardown is safe from any state because failures can
   leave the bridge half-started. A stop also cancels a start still in
   flight: every `start`/`stop` bumps a generation counter, and an async call
-  that finds itself superseded leaves the newer session alone.
+  that finds itself superseded leaves the newer session alone. Events
+  native sends while the cancel is under way are dropped: `EventChannel`
+  removes its Dart handler before telling native to stop, and Flutter would
+  otherwise keep the last such event and deliver it to the next
+  subscription (a mock peer showing up in the next BLE session).
+  `ProximityEventChannel` sets that channel's buffer to zero.
 - **Resume retry**: the Dart controller remembers that a start was
   requested. If that start failed, or the bridge later reported an error on
   the event stream, it retries when the app returns to the foreground. On
@@ -298,8 +303,9 @@ Three safety nets, in order of speed:
   start anyway, and Herald begins scanning and advertising once Bluetooth
   comes on.
 - **Peer departure**: cooperative peers announce a protocol-level goodbye
-  (see above) and are removed instantly. The 20 s staleness eviction remains
-  as the fallback for peers that never got to say it. Either way Dart calls
+  (see above) and are removed instantly. The staleness eviction (20 s on
+  iOS, 90 s on Android) remains as the fallback for peers that never got to
+  say it. Either way Dart calls
   `forgetPeer` so the native side frees that peer's distance model —
   otherwise per-peer state would grow forever. (On a goodbye, native has
   already freed it.)
@@ -328,6 +334,13 @@ These come from Herald 2.2.0, from deliberate scope limits, or from edge
 cases in the Dart controller, and are worth knowing before building on the
 bridge:
 
+- **Near Apple devices, an Android receiver hears peers about once a
+  minute.** Herald for Android stops scanning while it tries to connect to
+  every nearby Apple device it hasn't identified, and doesn't give up on
+  ones that time out, so each cycle can take a minute with only 4 s of
+  scanning. The bridge waits 90 s before dropping a peer on Android, which
+  makes departed peers linger there longer. See
+  [android.md](android.md#herald-listens-in-bursts).
 - **Relayed payloads can briefly resurrect a stopped iPhone.** Herald's
   payload sharing has Android devices relay the payloads of iOS peers they
   have read to other iOS peers, for up to 5 minutes after last seeing them,
@@ -368,14 +381,17 @@ bridge:
 - **Reopening the app while native kept running changes the peer id.**
   Peer ids are random per Dart isolate. After a hot restart, or reopening an
   Android app whose service survived a swipe-away, the next start broadcasts
-  a new id; peers drop the old one by staleness eviction.
+  a new id. Android receivers drop the old one when they next read that
+  device and get the new id ([android.md](android.md#a-new-id-from-the-same-device));
+  iOS receivers, and Android ones that never read it again, drop it by
+  staleness eviction.
 - **No state restoration on iOS.** See [ios.md](ios.md#background-modes-and-state-restoration).
 - **A start that cuts a stop short keeps the old peer list.** `stop()`
   clears the peer list only once its teardown finishes, and skips that when
   a newer `start()` took over meanwhile; `start()` itself never clears it.
   Peers from before the stop stay listed until a new sighting refreshes
   them, a goodbye removes them, or the staleness eviction drops them
-  20–25 s after their last sighting. Only back-to-back calls hit this: in the demo the stop
+  20–25 s (iOS) or 90–95 s (Android) after their last sighting. Only back-to-back calls hit this: in the demo the stop
   comes from the mock-mode toggle in the error state and Start is a
   separate tap, by which time the teardown (a stream cancel and one native
   call) has normally finished.

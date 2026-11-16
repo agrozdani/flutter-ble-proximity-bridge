@@ -82,8 +82,10 @@ delivered to the service yet (see [android.md](android.md#stop-versus-a-start-in
 |---|---|---|
 | `peerId` | int | Peer whose native distance model should be freed. |
 
-Dart owns the "peer departed" heuristic (no sightings for 20 s) and drives
-native cleanup with this call.
+Dart owns the "peer departed" heuristic (no sightings for 20 s on iOS, 90 s
+on Android, where Herald listens in bursts; see
+[android.md](android.md#herald-listens-in-bursts)) and drives native
+cleanup with this call.
 
 ## Events
 
@@ -107,10 +109,17 @@ The native source (BLE or mock) finished initializing. Re-sent to late
 subscribers — see the ready-replay pattern in
 [architecture.md](architecture.md).
 
-### `{type: "gone", id: int}`
+### `{type: "gone", id: int, reason?: String}`
 
 A protocol-level goodbye: peer `id` announced that it stopped. Dart removes
 the peer immediately instead of waiting out the staleness eviction.
+
+`reason` is absent for a goodbye. Android also sends `reason: "replaced"`
+when a device it last read as `id` is read with another id: the app on that
+device started again (ids are per launch), so `id` is gone. Without it, the
+old id would stay listed next to the new one until eviction, 90 s on
+Android ([android.md](android.md#a-new-id-from-the-same-device)). iOS
+never sends a `reason`.
 
 This event exists because BLE itself has no goodbye. A stopped peripheral
 cannot force-disconnect centrals that are already connected to it, and those

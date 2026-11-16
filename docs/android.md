@@ -86,13 +86,98 @@ Note that Herald 2.2.0 for Android *receives* immediate-send frames but
 never delivers them to the delegate (the call is commented out in its GATT
 server), so `didReceive` never fires here: goodbye/hello frames from this
 device reach iOS peers only, and Android peers drop a stopped device by
-staleness eviction. `PayloadPipeline` runs `FrameOverrides` exactly as on
+staleness eviction (90 s here; see
+[Herald listens in bursts](#herald-listens-in-bursts)). `PayloadPipeline` runs `FrameOverrides` exactly as on
 iOS, but with no frames arriving it has no frame to apply here. Its
 revision check could still drop a stale read; with this app's per-launch
 peer ids none arrives in practice, since an Android receiver reads payloads
 straight from the peer and Herald never relays payloads to Android. (A peer
 id reused by a new process would look stale here too; see
 [What is deliberately not here](architecture.md#what-is-deliberately-not-here).)
+
+## Herald listens in bursts
+
+Herald 2.2.0 for Android does not scan all the time. Its receiver
+(`ConcreteBLEReceiver`) runs a fixed loop, with timings that are
+`private static final` in Herald and so cannot be configured:
+
+1. Scan for 4 s.
+2. Wait 1 s.
+3. Process what the scan found, **without scanning**: connect to each
+   device that needs it, one at a time, until all are done or 60 s have
+   passed (checked before each device). A connect gives up after 8 s; a
+   device that connected is waited on until it disconnects, for up to 60 s.
+4. Wait 2 s, then scan again.
+
+Step 3 connects to every device Herald has not identified yet. That is how
+it finds iPhones running the app in the background: iOS puts a background
+app's service UUIDs in an "overflow" area that only an iOS device scanning
+for them can see (`startAdvertising:` in CoreBluetooth's
+`CBPeripheralManager.h`), so to Android such an iPhone is just an Apple
+device. Herald therefore marks each Apple device
+its feature filter (`BLESensorConfiguration.deviceFilterFeaturePatterns`)
+lets through as `ios_tbc` and connects to it. A device that connects but
+has no sensor service is then ignored for a minute (1.2× longer each time,
+up to 3 minutes). A device whose connect *times out* is not ignored: it is
+tried again on every cycle.
+
+So near a handful of Apple devices that don't run the app (Macs, phones,
+watches, earbuds), step 3 uses its whole minute on every cycle, the loop
+takes about 65 s, and a peer right next to the Android device is heard
+only during the 4 s scans. On a Pixel Tablet next to an iPad (2026-11-16),
+about 20 Apple addresses timed out on every cycle; the iPad was heard for
+about 4 s and then not for about 60 s, over and over. Once, after the
+iPad's Bluetooth address changed, Herald read its payload at the new
+address only after that cycle's scan had ended, and the iPad went unheard
+for about 120 s. In the logs this looks like `native.stats … herald: none`
+for most of each minute, with Herald's `taskConnectDevice, connect timeout
+(device=…,os=ios_tbc,…)` warnings in logcat about every 8 s, and a burst of
+`native.emit` lines for the peer about once a minute.
+
+What the bridge does about it: on Android, Dart's eviction window is 90 s
+instead of 20 s (`PeersController.staleAfterFor`), so a peer outlasts one
+whole cycle with margin. The costs:
+
+- A peer that walks away or crashes stays listed for up to about 95 s.
+  Because Android never gets goodbye frames (above), so does a peer that
+  stopped.
+- Distances on an Android receiver change about once a minute in such a
+  room.
+- A peer can still drop out briefly when two scans in a row miss it, as
+  after the address change above.
+
+Fixing the cause needs a change to Herald itself: ignoring a device whose
+connect timed out, as it ignores one without the sensor service, or
+shorter limits. In a room with few Apple devices the loop is short and
+none of this shows, except that a departed peer takes longer to clear.
+
+## A new id from the same device
+
+Peer ids are per launch, so a peer that restarts the app (or hot restarts
+it) broadcasts a new id from the same phone. Herald for Android keeps
+handing over its cached copy of the phone's last read, under the old id,
+with every RSSI reading until it reads the phone again. Dart then lists the
+phone twice, and with the 90 s window above the old entry would stay for a
+minute and a half. Seen on the Pixel after the iPad's hot restart:
+`00724371` and `7DCBB640` were the same iPad, read from the same address
+`50:9E:45:C3:96:64` 89 s apart.
+
+So `PayloadPipeline` remembers which id it last read from each device
+(Herald's target, the Bluetooth address on Android). When a read from a
+device returns another id, the old id is reported `gone` with
+`reason: "replaced"` and removed at once. The rules:
+
+- Only reads count. A cached copy is Herald's memory of a read, not the
+  device speaking. Herald for Android never relays payloads to Android, so
+  a read here is always the device itself (on iOS a relayed payload can
+  arrive as a read, so iOS has no such rule).
+- A device's last read is remembered for 15 minutes, as long as Herald for
+  Android keeps the device and its cached payload
+  (`taskRemoveExpiredDevices`).
+- While the bridge is stopped the read is still remembered, but nothing is
+  reported (Dart cleared its list at the stop).
+- If the phone also changed its Bluetooth address, the read comes from a
+  new target and nothing is replaced: the old id then goes by eviction.
 
 ## The pending-sink race
 

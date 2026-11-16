@@ -493,14 +493,15 @@ persistence, no retry/backoff beyond resume-retry, and no Pigeon (the channels
 are hand-written to remain legible). The full list is in
 [architecture.md → What is deliberately not here](docs/architecture.md#what-is-deliberately-not-here).
 Known limitations — mostly inherited from Herald 2.2.0, such as relayed
-payloads briefly resurrecting a stopped iPhone — are listed in
+payloads briefly resurrecting a stopped iPhone, or Android hearing peers only
+about once a minute near other Apple devices — are listed in
 [architecture.md → Known limitations](docs/architecture.md#known-limitations).
 
 ## Documentation
 
 - [Architecture](docs/architecture.md) — bridge design, data flow, lifecycle, threading
 - [Channel contract](docs/channel-contract.md) — every method, event, and wire byte
-- [Android implementation](docs/android.md) — foreground service, permissions, the pending-sink race
+- [Android implementation](docs/android.md) — foreground service, permissions, the pending-sink race, Herald's scan cycle
 - [iOS implementation](docs/ios.md) — background modes, state restoration, the Herald patches
 - [Logging and debugging](docs/logging.md) — the log format, where lines go, collecting and merging logs from several devices, a debugging playbook
 
