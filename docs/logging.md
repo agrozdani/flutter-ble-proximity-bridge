@@ -32,7 +32,10 @@ and what reached the UI.
   `1A2B3C4D android st=2 col=3 rev=17 online v3` (peer id, sender's
   platform, status code, color index, revision, offline flag, protocol
   version).
-- Stack traces follow on indented lines.
+- Stack traces follow on indented lines. They belong to the line above
+  them: the in-app viewer keeps them with it (and its level), and
+  `tool/devlogs.dart merge` keeps them from a log file, from `flutter run`
+  output and from a logcat capture.
 
 The format is defined once in
 [`log_line.dart`](../lib/src/logging/log_line.dart) and pinned by
@@ -44,7 +47,7 @@ native unit tests.
 
 | | Dart lines | Native lines |
 |---|---|---|
-| Console | printed (`flutter run` shows them; logcat tag `flutter` on Android) | logcat tag `BPB` (Android); iOS: stderr when launched with `OS_ACTIVITY_DT_MODE` (`flutter run` on a device, Xcode's test runner), otherwise os_log category `BPB` (below) |
+| Console | printed (`flutter run` shows them; logcat tag `flutter` on Android). On iOS with a stderr console, native writes them there and Dart does not print them (below) | logcat tag `BPB` (Android); iOS: stderr when launched with `OS_ACTIVITY_DT_MODE` (`flutter run` on a device, Xcode's test runner), otherwise os_log category `BPB` (below) |
 | `flutter run` | yes | yes: logcat on Android, stderr on an iOS device, echoed by Dart on the iOS simulator (below) |
 | Log file on the device | yes (sent to native) | yes |
 | In-app viewer | yes | yes (sent to Dart) |
@@ -68,7 +71,13 @@ sit next to the native lines of the calls they describe.
 - Android: the tool shows every logcat line from the app's process, so
   `BPB` lines appear on their own. It learns the process id only once it
   connects to the Dart VM; the first few native lines of a launch (the log
-  header) are in logcat and the file but not in `flutter run`.
+  header) are in logcat and the file but not in `flutter run`. logcat cuts
+  an entry off at about 4 KB (on a Pixel Tablet, Android 17, `flutter run`
+  had the first 4062 characters of a 6086-character line), so the native
+  logger sends a stack trace one line per entry and a longer line in
+  pieces of 1300 characters, the later ones indented; `flutter run` then
+  showed that line whole, in five pieces. The log file and the in-app
+  viewer hold it as one line.
 - iOS device (iOS 17 or later), Xcode 26 or later, debug and profile: the
   tool launches the app with `xcrun devicectl device process launch
   --console --environment-variables {"OS_ACTIVITY_DT_MODE": "enable"}` (in
@@ -112,7 +121,7 @@ an iOS 26.4 simulator, 2026-11-16:
 
 | Launch | Console | Native lines shown |
 |---|---|---|
-| `flutter run` (debug) on the iPad | stderr | once each, launch header included; also after a hot restart |
+| `flutter run` (debug) on the iPad | stderr | once each, launch header included; also after a hot restart. Dart lines too, once each, written by native |
 | `flutter run --profile` on the iPad | stderr | once each, launch header included (see below) |
 | `flutter debug_adapter` (what VS Code runs), debug, on the iPad | stderr | once each as DAP `output` events (`console` before the app starts, `stdout` after); also after a hot restart |
 | VS Code, F5, debug, on the iPad | stderr | once each in the Debug Console, launch header included |
@@ -123,19 +132,57 @@ an iOS 26.4 simulator, 2026-11-16:
 | `flutter run` on the simulator | os_log | once each, printed by Dart (`flutter: ...`) |
 
 While the variable is set our lines are not in os_log, so Console.app and
-`log stream` do not see them; the log file has them all. Writing to stderr
-was not seen to stall the app: under Xcode's test runner 1 MB went out in
-51 ms, and after `flutter run` and its devicectl were killed (the app kept
-running), the app went on writing a 2 KB line every 5 s for the 2 min 40 s
-it was watched. Should a reader stop reading anyway, only the threads
-writing to the console wait: the console write happens after the logger's
-lock is released, so the log file, Dart and the main thread carry on
-(pinned by `BridgeLogConsoleWriterTests`). SIGPIPE is ignored in the app in
-every launch checked (`SIG_IGN` before the logger starts, under `flutter
-run`, Xcode's test runner and a plain devicectl launch); the console's fd
-also has `F_SETNOSIGPIPE` set, shown as `SIGPIPE off` in the `console`
-line, in case that changes. Problems with the log file itself (it cannot
-be opened or written) are logged as errors, so they reach the console.
+`log stream` do not see them; the log file has them all.
+
+**A console nobody reads.** A write to stderr waits until someone reads it.
+Under Xcode's test runner 1 MB went out in 51 ms, and after `flutter run`
+and its devicectl were killed the app kept running (it wrote a 2 KB line
+every 5 s for the 2 min 40 s it was watched). But with the Mac's devicectl
+console process paused (`kill -STOP`; `flutter run` on the iPad,
+2026-11-16), the app took about 1.2 MB of native log lines and then stood
+still, Dart and the UI included, for the 3 min 16 s until the process was
+resumed: the logger wrote to stderr on the thread that logged, here the
+main thread, and Dart stopped answering with it (its VM service too).
+Dart's own `print` waited the same way: with the console paused again,
+1500 printed lines of 1 KB went out and the next ones did not, until the
+resume.
+
+So with a stderr console, nothing in the logging system writes to it on a
+thread of the app:
+
+- The native logger only queues a line (`BridgeLog.ConsoleWriter`); one
+  background queue does the writing. Up to 256 KB wait for the reader.
+  Lines beyond that are left out of the console (never of the log file)
+  until the queue is half empty, and the next line is preceded by
+  `W native.log [console] N line(s) left out of this console, ...`. A burst
+  faster than the reader does the same: 2.4 MB logged within a second left
+  lines out although `flutter run` was reading. At the rate this app logs
+  (about 0.5 KB a second in the mock run watched) no line was left out.
+- Dart does not print its lines there. Native says so in its `configure`
+  answer (`printsDart`), Dart marks each line it forwards as `printed` or
+  not, and native writes the unprinted ones to the console through the same
+  queue. In `flutter run` these lines have no `flutter:` prefix; the few
+  Dart logs before the answer arrives (the `dart start` header) are printed
+  by Dart and have it. Each line still shows once.
+
+Checked on the iPad with the same paused console: 1.2 MB of native lines
+and 1 MB of Dart log lines went through the logger while the app kept
+running (Dart answered and mock sightings kept arriving for the 56 s the
+console stayed paused), and after the resume `flutter run` showed four
+notes (705 lines left out) and went on with live lines. What can still wait on a console
+nobody reads is anything else that writes to stderr or os_log from the
+app: a plain `print`/`debugPrint` outside `Log`, Flutter's own error dump,
+and Herald's logging (at `fault` only its faults; `HERALD_LOG=debug` is
+verbose). On Android this does not arise: liblog sends an entry to logd on
+a non-blocking socket and drops it when logd is overloaded (AOSP main,
+`system/logging/liblog/logd_writer.cpp`).
+
+SIGPIPE is ignored in the app in every launch checked (`SIG_IGN` before
+the logger starts, under `flutter run`, Xcode's test runner and a plain
+devicectl launch); the console's fd also has `F_SETNOSIGPIPE` set, shown
+as `SIGPIPE off` in the `console` line, in case that changes. Problems
+with the log file itself (it cannot be opened or written) are logged as
+errors, so they reach the console.
 
 In profile the tool shows console output only after devicectl prints
 `Waiting for the application to terminate` (`launchAppAndStreamLogs`), and
@@ -332,7 +379,8 @@ all devices:
 
 Any files can be merged, pulled or captured, in any mix; a line that
 appears in two of them (a pulled file and a `flutter run` capture of the
-same device) is kept once:
+same device, given the same label) is kept once, while a line that one
+file holds twice (the same event twice within a millisecond) stays two:
 
 ```bash
 dart run tool/devlogs.dart merge --level I phone=logs/x/Pixel-7.log phone=logs/live/pixel.log ipad=logs/x/iPad.log

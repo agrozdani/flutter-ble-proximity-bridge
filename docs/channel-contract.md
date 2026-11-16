@@ -248,8 +248,8 @@ Methods on `ble_proximity_bridge/log`:
 
 | Method | Arguments | Result |
 |---|---|---|
-| `configure` | `level` (`debug`/`info`/`warn`/`error`), `herald` (`off`/`fault`/`info`/`debug`) | `{file: String?, echo: bool}`: the native log file's path, and whether Dart should print native lines (true on the iOS simulator when native logs to os_log; false where it writes to stderr, e.g. under Xcode's test runner; see [logging.md](logging.md)) |
-| `write` | `lines`: `List<String>` of formatted Dart lines | `null`; native appends them to its log file |
+| `configure` | `level` (`debug`/`info`/`warn`/`error`), `herald` (`off`/`fault`/`info`/`debug`) | `{file: String?, echo: bool, printsDart: bool?}`: the native log file's path; whether Dart should print native lines (true on the iOS simulator when native logs to os_log; false where it writes to stderr, e.g. under Xcode's test runner); and whether native writes Dart's lines to the console itself, so that Dart must not print them (true on iOS when the console is stderr; absent on Android). See [logging.md](logging.md) |
+| `write` | `lines`: `List<String>` of formatted Dart lines; `printed`: bool, whether Dart printed them itself (absent: it did) | `null`; native appends them to its log file, and writes them to its console when `printed` is false |
 
 Events on `ble_proximity_bridge/logs` are `List<String>` batches of
 formatted native lines. Lines logged while nothing listens are held (up to
