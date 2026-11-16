@@ -89,9 +89,10 @@ abstract final class Log {
   }
 
   /// Adds lines the native logger sent over its event channel. They are
-  /// only buffered: the native side already wrote them to logcat / os_log,
-  /// which is where `flutter run` shows them, and to the log file. (Except
-  /// on the iOS simulator; see [echoNative].)
+  /// only buffered: the native side already wrote them to its console
+  /// (logcat on Android; stderr or os_log on iOS), which is where
+  /// `flutter run` shows them, and to the log file. (Except on the iOS
+  /// simulator; see [echoNative].)
   static void addNative(String line) {
     final level = LogLine.find(line)?.level ?? LogLevel.info;
     buffer.add(LogRecord(line, level, native: true));

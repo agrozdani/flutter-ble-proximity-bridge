@@ -743,3 +743,30 @@ class PayloadPipelineTests: XCTestCase {
     XCTAssertEqual(events, [])
   }
 }
+
+/// Where native lines go for a console, and whether Dart echoes them
+/// (BridgeLog.Console; docs/logging.md, "How native lines reach
+/// `flutter run`").
+class BridgeLogConsoleTests: XCTestCase {
+
+  func testNoConsoleModeUsesOsLog() {
+    XCTAssertEqual(BridgeLog.Console(environment: [:]), .osLog)
+    XCTAssertEqual(BridgeLog.Console(environment: ["OS_ACTIVITY_DT_MODE": ""]), .osLog)
+  }
+
+  func testTheValuesSeenOnADeviceUseStandardError() {
+    // flutter_tools' devicectl launch.
+    XCTAssertEqual(
+      BridgeLog.Console(environment: ["OS_ACTIVITY_DT_MODE": "enable"]), .standardError)
+    // Xcode's test runner.
+    XCTAssertEqual(
+      BridgeLog.Console(environment: ["OS_ACTIVITY_DT_MODE": "YES"]), .standardError)
+  }
+
+  func testDartEchoesOnlyOsLogLinesOnASimulator() {
+    XCTAssertTrue(BridgeLog.dartShouldEcho(console: .osLog, simulator: true))
+    XCTAssertFalse(BridgeLog.dartShouldEcho(console: .osLog, simulator: false))
+    XCTAssertFalse(BridgeLog.dartShouldEcho(console: .standardError, simulator: true))
+    XCTAssertFalse(BridgeLog.dartShouldEcho(console: .standardError, simulator: false))
+  }
+}
