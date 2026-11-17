@@ -365,7 +365,27 @@ bridge:
   distance is not the relayed peer's. The same path can hand a device its
   *own* older payload — the relay only skips a copy that is byte-identical
   to the peer's current one — which is why the pipeline drops any payload
-  carrying the device's own id.
+  carrying the device's own id. After a relaunch the device has a new id,
+  and a relay that still holds the old launch's record (Herald for Android
+  keeps it up to 15 minutes, and cannot tie it to the new launch once the
+  Bluetooth address has rotated) hands the old payload over as another
+  device's. Seen on an iPad relaunched 8 minutes after its previous launch:
+  it listed that launch as a peer for about 20 s. So each device also keeps
+  the ids it broadcast as in the last 30 minutes, across launches
+  (`OwnPeerIdHistory`), and drops those too. Keeping one id across launches
+  would avoid this, but needs the payload revision counter persisted as
+  well (see `BridgeController`).
+  The same relay can hand a *third* device a relaunched peer's old id,
+  which it then lists next to the new one until the relays stop. This
+  follows from the mechanism but was not observed: the hardware runs had
+  two devices. No receiver can tell that the two ids are one device, and
+  telling it would need a new payload field (see the wire format in
+  [channel-contract.md](channel-contract.md#wire-payload-ble): no spare
+  bits). Herald 2.2.0 for Android only relays devices it updated within the
+  last 5 minutes (`payloadSharingExpiryTimeInterval`, from its bytecode),
+  but the iPad's ghost above came about 8 minutes after that launch ended,
+  so what refreshes a departed device's record is not known. In a crowd
+  this is more likely, since more Android devices hold old records.
 - **Android keeps the CPU awake while the process lives.** Every Herald
   `SensorArray` on Android creates a timer that acquires a partial wake
   lock and releases it only in a finalizer. The timer's thread never ends

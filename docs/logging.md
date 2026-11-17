@@ -314,8 +314,9 @@ I dart.stats phase=running mock=false gen=3 events peer=+15/121 gone=+0/0 ready=
 ```
 
 - `herald:` counts the callbacks since the last line (`read`, `frame`,
-  `cached`, `shared`, `detect`, `rssiOnly`, `malformed`, `own`) and each
-  verdict; `whileStopped` counts callbacks after a stop, `replaced` (Android)
+  `cached`, `shared`, `detect`, `rssiOnly`, `malformed`, `own`,
+  `ownPrevious`: a payload with one of this device's earlier ids, see
+  [architecture.md](architecture.md#known-limitations)) and each verdict; `whileStopped` counts callbacks after a stop, `replaced` (Android)
   old ids retired because their device now has a new one.
 - `to dart: peer=+14/120` is events sent since the last line / in total;
   `nosink` counts events dropped because Dart was not listening. Compare

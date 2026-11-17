@@ -36,6 +36,8 @@ class PayloadPipeline(
     private val listener: Listener,
     private val onMalformed: (size: Int) -> Unit = {},
     private val now: () -> Long = SystemClock::elapsedRealtime,
+    /** Whether an id is one this device broadcast as before; see [OwnPeerIdHistory]. */
+    private val isPreviousOwnPeerId: (Long) -> Boolean = { false },
 ) : SensorDelegate {
 
     interface Listener {
@@ -165,6 +167,17 @@ class PayloadPipeline(
         if (peerId == localPeerId()) {
             stats.add("own")
             BridgeLog.d("pipeline") { "${label(source)} own payload ${StatusPayloadSupplier.describe(data)}, dropped" }
+            return
+        }
+        // The same for our ids from earlier launches: a peer that has not
+        // tied its record of our old launch to the new one relays the old
+        // payload to us as another device's (OwnPeerIdHistory says when).
+        if (isPreviousOwnPeerId(peerId)) {
+            stats.add("ownPrevious")
+            BridgeLog.d("pipeline") {
+                "${label(source)} own payload from an earlier launch ${StatusPayloadSupplier.describe(data)} " +
+                    "via=${via(target)}, dropped"
+            }
             return
         }
 

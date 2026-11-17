@@ -26,6 +26,7 @@ class PayloadPipelineTest {
     private var clock = 0L
     private val events = mutableListOf<String>()
     private val malformed = mutableListOf<Int>()
+    private val previousOwnIds = mutableSetOf<Long>()
 
     private val overrides = FrameOverrides(
         ttlMillis = 30_000L,
@@ -59,6 +60,7 @@ class PayloadPipelineTest {
         },
         onMalformed = { malformed += it },
         now = { clock },
+        isPreviousOwnPeerId = { it in previousOwnIds },
     )
 
     private val ble = SensorType.BLE
@@ -131,6 +133,20 @@ class PayloadPipelineTest {
         pipeline.sensor(ble, payload(LOCAL_ID), target)
 
         assertEquals(emptyList<String>(), events)
+        // Dropped before FrameOverrides saw it, so it left nothing behind.
+        assertEquals(0, overrides.trackedPeerCount())
+    }
+
+    @Test
+    fun `a payload with one of our earlier ids is dropped without being recorded`() {
+        previousOwnIds += 42L
+        goodbye(42)
+        pipeline.sensor(ble, reading(-60.0), target, payload(42))
+        pipeline.sensor(ble, payload(42), target)
+        // The case seen on hardware: a relay hands it over.
+        pipeline.sensor(ble, listOf(payload(42), payload(8)), target)
+
+        assertEquals(listOf("peer 8 status 1 rssi null"), events)
         // Dropped before FrameOverrides saw it, so it left nothing behind.
         assertEquals(0, overrides.trackedPeerCount())
     }

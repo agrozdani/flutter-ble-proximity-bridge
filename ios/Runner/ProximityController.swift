@@ -60,6 +60,9 @@ final class ProximityController: NSObject, FlutterStreamHandler {
   }
 
   private(set) var payloadSupplier: StatusPayloadSupplier?
+
+  /// Our ids from earlier launches, which the pipeline drops like our own.
+  private let ownPeerIds = OwnPeerIdHistory.standard()
   let distanceEstimator = DistanceEstimator()
   private let frameOverrides = FrameOverrides(
     ttlSeconds: frameOverrideSeconds, iphoneGoodbyeTtlSeconds: iphoneGoodbyeOverrideSeconds,
@@ -72,6 +75,7 @@ final class ProximityController: NSObject, FlutterStreamHandler {
     frameOverrides: frameOverrides,
     isActive: { [weak self] in self?.sourceMode == .ble },
     localPeerId: { [weak self] in self?.localPeerId },
+    isPreviousOwnPeerId: { [ownPeerIds] in ownPeerIds.isPrevious($0) },
     onSighting: { [weak self] peerId, status, color, deviceKind, rssi in
       self?.handleSighting(
         peerId: peerId, status: status, color: color, deviceKind: deviceKind, rssi: rssi)
@@ -168,6 +172,13 @@ final class ProximityController: NSObject, FlutterStreamHandler {
     // frameOverrides is kept: the host, and with it Herald's cached payloads,
     // survives our stop/start, so the overrides still apply.
     localPeerId = peerId
+    ownPeerIds.noteCurrent(peerId)
+    let earlier = ownPeerIds.previousIds()
+    if !earlier.isEmpty {
+      BridgeLog.i(
+        "controller", "earlier own ids, dropped if relayed back: "
+          + earlier.map { peerHex($0) }.joined(separator: " "))
+    }
 
     if mock {
       // A cancelled stop may have left the host running, so always quiesce.

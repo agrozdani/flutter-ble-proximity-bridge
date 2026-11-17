@@ -608,6 +608,7 @@ class PayloadPipelineTests: XCTestCase {
   private var active = true
   private var events: [String] = []
   private var malformed: [Int] = []
+  private var previousOwnIds: Set<Int> = []
   private var overrides: FrameOverrides!
   private var pipeline: SensorDelegate!
 
@@ -616,12 +617,14 @@ class PayloadPipelineTests: XCTestCase {
     active = true
     events = []
     malformed = []
+    previousOwnIds = []
     overrides = FrameOverrides(
       ttlSeconds: 30, iphoneGoodbyeTtlSeconds: 5, revisionMemorySeconds: 60, now: { 0 })
     pipeline = PayloadPipeline(
       frameOverrides: overrides,
       isActive: { [unowned self] in self.active },
       localPeerId: { PayloadPipelineTests.localId },
+      isPreviousOwnPeerId: { [unowned self] in self.previousOwnIds.contains($0) },
       onSighting: { [unowned self] peerId, status, _, _, rssi in
         self.events.append("peer \(peerId) status \(status) rssi \(rssi.map { "\($0)" } ?? "nil")")
       },
@@ -696,6 +699,19 @@ class PayloadPipelineTests: XCTestCase {
     pipeline.sensor(.BLE, didRead: payload(Self.localId), fromTarget: target)
 
     XCTAssertEqual(events, [])
+    // Dropped before FrameOverrides saw it, so it left nothing behind.
+    XCTAssertEqual(overrides.trackedPeerCount(), 0)
+  }
+
+  func testAPayloadWithOneOfOurEarlierIdsIsDroppedWithoutBeingRecorded() {
+    previousOwnIds = [42]
+    goodbye(42)
+    pipeline.sensor(.BLE, didMeasure: reading(-60), fromTarget: target, withPayload: payload(42))
+    pipeline.sensor(.BLE, didRead: payload(42), fromTarget: target)
+    // The case seen on hardware: a relay hands it over.
+    pipeline.sensor(.BLE, didShare: [payload(42), payload(8)], fromTarget: target)
+
+    XCTAssertEqual(events, ["peer 8 status 1 rssi nil"])
     // Dropped before FrameOverrides saw it, so it left nothing behind.
     XCTAssertEqual(overrides.trackedPeerCount(), 0)
   }
@@ -997,5 +1013,116 @@ class BridgeLogConsoleWriterTests: XCTestCase {
     XCTAssertTrue(output.contains("I native.test"), output)
     XCTAssertTrue(output.contains("E native.log"), output)
     XCTAssertTrue(output.contains("log file write failed; file logging stops"), output)
+  }
+}
+
+/// Same cases as OwnPeerIdHistoryTest.kt on Android.
+class OwnPeerIdHistoryTests: XCTestCase {
+
+  private var stored: String?
+  private var writes = 0
+  private var clock: Int64 = 1_000_000
+
+  override func setUp() {
+    super.setUp()
+    stored = nil
+    writes = 0
+    clock = 1_000_000
+  }
+
+  private func history() -> OwnPeerIdHistory {
+    OwnPeerIdHistory(
+      read: { [unowned self] in self.stored },
+      write: { [unowned self] in
+        self.stored = $0
+        self.writes += 1
+      },
+      now: { [unowned self] in self.clock })
+  }
+
+  func testANewIdMakesTheLastOnePreviousTheCurrentOneIsNot() {
+    let history = history()
+    history.noteCurrent(1)
+    XCTAssertFalse(history.isPrevious(1))
+
+    history.noteCurrent(2)
+    XCTAssertTrue(history.isPrevious(1))
+    XCTAssertFalse(history.isPrevious(2))
+    XCTAssertFalse(history.isPrevious(3))
+  }
+
+  func testTheSameIdAgainChangesNothing() {
+    let history = history()
+    history.noteCurrent(1)
+    history.noteCurrent(1)
+
+    XCTAssertEqual(history.previousIds(), [])
+  }
+
+  func testTheHistorySurvivesARelaunch() {
+    history().noteCurrent(1)
+    // The next launch, with a new id.
+    let next = history()
+    next.noteCurrent(2)
+    XCTAssertTrue(next.isPrevious(1))
+
+    let third = history()
+    third.noteCurrent(3)
+    XCTAssertEqual(third.previousIds(), [1, 2])
+  }
+
+  func testAnIdIsForgottenAfterTheRetention() {
+    let history = history()
+    history.noteCurrent(1)
+    history.noteCurrent(2)
+
+    clock += OwnPeerIdHistory.retentionMillis
+    XCTAssertTrue(history.isPrevious(1))
+    clock += 1
+    XCTAssertFalse(history.isPrevious(1))
+
+    // And it is pruned from storage on the next change.
+    history.noteCurrent(3)
+    XCTAssertEqual(self.history().previousIds(), [2])
+  }
+
+  func testOnlyTheNewestIdsAreKept() {
+    let history = history()
+    // Ids 0 to capacity + 1: capacity + 1 previous ones, the oldest dropped.
+    for id in 0...(OwnPeerIdHistory.capacity + 1) { history.noteCurrent(id) }
+
+    let previous = history.previousIds()
+    XCTAssertEqual(previous.count, OwnPeerIdHistory.capacity)
+    XCTAssertEqual(previous.first, 1)
+    XCTAssertEqual(previous.last, OwnPeerIdHistory.capacity)
+  }
+
+  func testAnIdThatComesBackIsCurrentNotPrevious() {
+    let history = history()
+    history.noteCurrent(1)
+    history.noteCurrent(2)
+    history.noteCurrent(1)
+
+    XCTAssertFalse(history.isPrevious(1))
+    XCTAssertEqual(history.previousIds(), [2])
+  }
+
+  func testUnreadableStorageIsIgnored() {
+    stored = "garbage"
+    history().noteCurrent(1)
+    stored = "x|1@y,2@5,,3"
+    let history = history()
+    XCTAssertEqual(history.previousIds(), [2])
+    history.noteCurrent(9)
+    XCTAssertEqual(history.previousIds(), [2])
+  }
+
+  func testIsPreviousNeverWrites() {
+    let history = history()
+    history.noteCurrent(1)
+    let before = writes
+    _ = history.isPrevious(1)
+    _ = history.previousIds()
+    XCTAssertEqual(writes, before)
   }
 }

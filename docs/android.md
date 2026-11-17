@@ -11,6 +11,7 @@ Files: `android/app/src/main/kotlin/com/example/ble_proximity_bridge/`
 | `DistanceEstimator.kt` | Per-peer window → median → Kalman → bucket |
 | `KalmanFilter1D.kt` | Small 1-D Kalman-style smoothing filter |
 | `FrameOverrides.kt` | Decides which payload to believe: frames over cached copies, newest revision over stale ones |
+| `OwnPeerIdHistory.kt` | This device's earlier ids, kept across launches in `SharedPreferences`, so a relayed copy of an earlier launch's payload is dropped too (mirror of iOS; Herald 2.2.0 does not relay to Android) |
 | `MockPeerSource.kt` | Synthetic sightings for emulators |
 | `BridgeLog.kt` | Logging: logcat, the on-device log file, lines for Dart ([logging.md](logging.md)) |
 

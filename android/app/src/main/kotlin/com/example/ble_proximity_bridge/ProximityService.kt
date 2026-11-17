@@ -158,11 +158,19 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         FRAME_OVERRIDE_MILLIS, IPHONE_GOODBYE_OVERRIDE_MILLIS, REVISION_MEMORY_MILLIS,
     )
 
+    /**
+     * Our ids from earlier launches, which the pipeline drops like our own.
+     * Needs a Context, so it is created in onCreate, before any start.
+     */
+    @Volatile
+    private var ownPeerIds: OwnPeerIdHistory? = null
+
     /** Herald's delegate: turns its payload callbacks into sightings. */
     private val payloadPipeline = PayloadPipeline(
         frameOverrides,
         isActive = { sourceMode == SourceMode.BLE },
         localPeerId = { payloadSupplier?.currentPeerId() },
+        isPreviousOwnPeerId = { ownPeerIds?.isPrevious(it) == true },
         listener = object : PayloadPipeline.Listener {
             override fun onSighting(
                 peerId: Long,
@@ -227,6 +235,7 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         BridgeLog.start(applicationContext)
         instanceRef.set(this)
         BridgeLog.i("service", "created")
+        ownPeerIds = OwnPeerIdHistory.forContext(applicationContext)
         pendingSinkRef.getAndSet(null)?.let {
             BridgeLog.i("sink", "claiming the event sink parked before the service existed")
             onListen(null, it)
@@ -286,6 +295,16 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         distanceEstimator.clear()
         // frameOverrides is kept: the host, and with it Herald's cached
         // payloads, survives our stop/start, so the overrides still apply.
+        ownPeerIds?.let { history ->
+            history.noteCurrent(peerId)
+            val earlier = history.previousIds()
+            if (earlier.isNotEmpty()) {
+                BridgeLog.i(
+                    "service",
+                    "earlier own ids, dropped if relayed back: " + earlier.joinToString(" ") { peerHex(it) },
+                )
+            }
+        }
 
         if (mock) {
             // A racing stop may have left the BLE host running, so always

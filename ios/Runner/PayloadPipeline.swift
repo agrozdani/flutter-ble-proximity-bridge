@@ -18,6 +18,7 @@ final class PayloadPipeline: SensorDelegate {
   private let frameOverrides: FrameOverrides
   private let isActive: () -> Bool
   private let localPeerId: () -> Int?
+  private let isPreviousOwnPeerId: (Int) -> Bool
   private let onSighting:
     (_ peerId: Int, _ status: Int, _ color: Int, _ deviceKind: Int, _ rssi: Double?) -> Void
   private let onGone: (_ peerId: Int) -> Void
@@ -28,11 +29,14 @@ final class PayloadPipeline: SensorDelegate {
   private var _bluetoothState: SensorState?
 
   /// `isActive` says whether outcomes are reported (a BLE source is
-  /// logically running); `localPeerId` is the id this device broadcasts as.
+  /// logically running); `localPeerId` is the id this device broadcasts as;
+  /// `isPreviousOwnPeerId` says whether an id is one it broadcast as before
+  /// (see OwnPeerIdHistory).
   init(
     frameOverrides: FrameOverrides,
     isActive: @escaping () -> Bool,
     localPeerId: @escaping () -> Int?,
+    isPreviousOwnPeerId: @escaping (Int) -> Bool = { _ in false },
     onSighting: @escaping (Int, Int, Int, Int, Double?) -> Void,
     onGone: @escaping (Int) -> Void,
     onMalformed: @escaping (Int) -> Void = { _ in }
@@ -40,6 +44,7 @@ final class PayloadPipeline: SensorDelegate {
     self.frameOverrides = frameOverrides
     self.isActive = isActive
     self.localPeerId = localPeerId
+    self.isPreviousOwnPeerId = isPreviousOwnPeerId
     self.onSighting = onSighting
     self.onGone = onGone
     self.onMalformed = onMalformed
@@ -159,6 +164,17 @@ final class PayloadPipeline: SensorDelegate {
       count("own")
       BridgeLog.d(
         "pipeline", "\(label(source)) own payload \(StatusPayloadSupplier.describe(data)), dropped")
+      return
+    }
+    // The same for our ids from earlier launches: a peer that has not tied
+    // its record of our old launch to the new one relays the old payload to
+    // us as another device's (OwnPeerIdHistory says when).
+    if isPreviousOwnPeerId(peerId) {
+      count("ownPrevious")
+      BridgeLog.d(
+        "pipeline",
+        "\(label(source)) own payload from an earlier launch \(StatusPayloadSupplier.describe(data)) "
+          + "via=\(via(target)), dropped")
       return
     }
 
