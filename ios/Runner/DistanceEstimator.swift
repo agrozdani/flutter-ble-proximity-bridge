@@ -26,8 +26,28 @@ final class DistanceEstimator {
     let lastSampleAge: Double
   }
 
+  /// How long a peer's model outlives its last sample. A backstop: Dart
+  /// frees the model of every peer it evicts (`forgetPeer`), but only while
+  /// it is listening. When the bridge runs with no Dart listener, or a
+  /// forgetPeer call is lost, a peer that walks away (no goodbye) would
+  /// otherwise keep its model, and a line in every stats log, until the
+  /// bridge stops. Longer than Dart's longest eviction window (90 s, for
+  /// Android receivers), so it never expires a model before Dart would have
+  /// dropped the peer for silence; a peer Dart keeps listed through payloads
+  /// without RSSI just starts a fresh model at its next reading.
+  static let modelMemorySeconds = 120.0
+
+  /// How often expired models are swept, at most.
+  private static let sweepIntervalSeconds = 10.0
+
+  private let now: () -> Double
   private let lock = NSLock()
   private var models: [Int: PeerModel] = [:]
+  private var lastSweepAt: Double?
+
+  init(now: @escaping () -> Double = MonotonicClock.seconds) {
+    self.now = now
+  }
 
   /// Drops all per-peer history. Called when the bridge stops.
   func clear() {
@@ -48,6 +68,8 @@ final class DistanceEstimator {
     guard !rssi.isNaN else { return nil }
     lock.lock()
     defer { lock.unlock() }
+    let time = now()
+    sweepIfDue(time)
     let model: PeerModel
     if let existing = models[peerId] {
       model = existing
@@ -55,7 +77,14 @@ final class DistanceEstimator {
       model = PeerModel(senderDeviceKind: senderDeviceKind)
       models[peerId] = model
     }
-    return model.addAndEstimate(rssi)
+    return model.addAndEstimate(rssi, now: time)
+  }
+
+  /// The number of peers with a model, expired ones included until swept.
+  var modelCount: Int {
+    lock.lock()
+    defer { lock.unlock() }
+    return models.count
   }
 
   /// Frees the model for a peer that left.
@@ -68,12 +97,26 @@ final class DistanceEstimator {
   func snapshot() -> [Snapshot] {
     lock.lock()
     defer { lock.unlock() }
-    let now = MonotonicClock.seconds()
+    let time = now()
+    // Every 15 s from the stats line, so a full sweep is cheap here.
+    sweep(time)
     return models.compactMap { peerId, model in
       model.last.map {
-        Snapshot(peerId: peerId, last: $0, lastSampleAge: now - model.lastSampleAt)
+        Snapshot(peerId: peerId, last: $0, lastSampleAge: time - model.lastSampleAt)
       }
     }
+  }
+
+  /// Call with the lock held.
+  private func sweepIfDue(_ time: Double) {
+    if let last = lastSweepAt, time - last < Self.sweepIntervalSeconds { return }
+    sweep(time)
+  }
+
+  /// Call with the lock held.
+  private func sweep(_ time: Double) {
+    lastSweepAt = time
+    models = models.filter { time - $0.value.lastSampleAt <= Self.modelMemorySeconds }
   }
 
   private final class PeerModel {
@@ -110,8 +153,7 @@ final class DistanceEstimator {
         : PeerModel.rssiCutoffsAndroidSender
     }
 
-    func addAndEstimate(_ rssi: Double) -> Estimate? {
-      let now = MonotonicClock.seconds()
+    func addAndEstimate(_ rssi: Double, now: Double) -> Estimate? {
       window.append((time: now, rssi: rssi))
       if window.count > PeerModel.maxSamples {
         window.removeFirst(window.count - PeerModel.maxSamples)

@@ -10,7 +10,29 @@ import android.os.SystemClock
  * bucket. The output is a bucket (0.5 / 1.5 / 3.5 / 8.0 m) on purpose:
  * RSSI jumps around too much for anything more precise.
  */
-class DistanceEstimator {
+class DistanceEstimator(
+    /** Monotonic milliseconds; elapsedRealtime ignores clock changes and counts through sleep. */
+    private val now: () -> Long = SystemClock::elapsedRealtime,
+) {
+
+    companion object {
+        /**
+         * How long a peer's model outlives its last sample. A backstop:
+         * Dart frees the model of every peer it evicts (`forgetPeer`), but
+         * only while it is listening. When the service runs with no Dart
+         * listener, or a forgetPeer call is lost, a peer that walks away
+         * (no goodbye) would otherwise keep its model, and a line in every
+         * stats log, until the bridge stops. Longer than Dart's longest
+         * eviction window (90 s, for Android receivers), so it never
+         * expires a model before Dart would have dropped the peer for
+         * silence; a peer Dart keeps listed through payloads without RSSI
+         * just starts a fresh model at its next reading.
+         */
+        const val MODEL_MEMORY_MILLIS = 120_000L
+
+        /** How often expired models are swept, at most. */
+        private const val SWEEP_INTERVAL_MILLIS = 10_000L
+    }
 
     /** One estimate and what it was computed from, for the log. */
     data class Estimate(
@@ -26,6 +48,7 @@ class DistanceEstimator {
     data class Snapshot(val peerId: Long, val last: Estimate, val lastSampleAgeMillis: Long)
 
     private val models = HashMap<Long, PeerModel>()
+    private var lastSweepAt: Long? = null
 
     @Synchronized
     fun clear() {
@@ -44,17 +67,39 @@ class DistanceEstimator {
     @Synchronized
     fun addSampleDetailed(peerId: Long, rssi: Double, senderDeviceKind: Int): Estimate? {
         if (rssi.isNaN()) return null
+        val time = now()
+        sweepIfDue(time)
         val model = models.getOrPut(peerId) { PeerModel(senderDeviceKind) }
-        return model.addAndEstimate(rssi)
+        return model.addAndEstimate(rssi, time)
     }
+
+    /** The number of peers with a model, expired ones included until swept. */
+    @get:Synchronized
+    val modelCount: Int
+        get() = models.size
 
     @Synchronized
     fun snapshot(): List<Snapshot> {
-        val now = SystemClock.elapsedRealtime()
+        val time = now()
+        // Every 15 s from the stats line, so a full sweep is cheap here.
+        sweep(time)
         return models.mapNotNull { (peerId, model) ->
             val last = model.last ?: return@mapNotNull null
-            Snapshot(peerId, last, now - model.lastSampleAt)
+            Snapshot(peerId, last, time - model.lastSampleAt)
         }
+    }
+
+    /** Call while synchronized. */
+    private fun sweepIfDue(time: Long) {
+        val last = lastSweepAt
+        if (last != null && time - last < SWEEP_INTERVAL_MILLIS) return
+        sweep(time)
+    }
+
+    /** Call while synchronized. */
+    private fun sweep(time: Long) {
+        lastSweepAt = time
+        models.values.removeAll { time - it.lastSampleAt > MODEL_MEMORY_MILLIS }
     }
 
     /** Frees the model for a peer that left. */
@@ -86,8 +131,8 @@ class DistanceEstimator {
         var lastSampleAt = 0L
             private set
 
-        // (elapsedRealtime ms, rssi) pairs. elapsedRealtime is monotonic,
-        // so clock changes cannot break the window.
+        // (now() ms, rssi) pairs. now() is monotonic, so clock changes
+        // cannot break the window.
         private val window = ArrayDeque<Pair<Long, Double>>()
         private val kalman = KalmanFilter1D(
             measurementNoise = 2.0,
@@ -95,8 +140,7 @@ class DistanceEstimator {
             processNoise = 0.05,
         )
 
-        fun addAndEstimate(rssi: Double): Estimate? {
-            val now = SystemClock.elapsedRealtime()
+        fun addAndEstimate(rssi: Double, now: Long): Estimate? {
             window.addLast(now to rssi)
             while (window.size > MAX_SAMPLES) window.removeFirst()
             while (window.isNotEmpty() && now - window.first().first > WINDOW_MILLIS) {

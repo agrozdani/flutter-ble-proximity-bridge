@@ -11,6 +11,7 @@ Files: `ios/Runner/`
 | `DistanceEstimator.swift` | Per-peer window → median → Kalman → bucket |
 | `KalmanFilter1D.swift` | Small 1-D Kalman-style smoothing filter |
 | `FrameOverrides.swift` | Decides which payload to believe: frames over cached copies, newest revision over stale ones |
+| `OwnPeerIdHistory.swift` | This device's earlier ids, kept across launches in a file in Application Support (atomic write, no backup), so a relayed copy of an earlier launch's payload is dropped too |
 | `MonotonicClock.swift` | A clock that keeps counting while the device sleeps |
 | `MockPeerSource.swift` | Synthetic sightings for the simulator |
 | `BridgeLog.swift` | Logging: the console (stderr or os_log), the on-device log file, lines for Dart ([logging.md](logging.md)) |

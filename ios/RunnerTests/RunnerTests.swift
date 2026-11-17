@@ -608,6 +608,7 @@ class PayloadPipelineTests: XCTestCase {
   private var active = true
   private var events: [String] = []
   private var malformed: [Int] = []
+  private var previousOwnIds: Set<Int> = []
   private var overrides: FrameOverrides!
   private var pipeline: SensorDelegate!
 
@@ -616,12 +617,14 @@ class PayloadPipelineTests: XCTestCase {
     active = true
     events = []
     malformed = []
+    previousOwnIds = []
     overrides = FrameOverrides(
       ttlSeconds: 30, iphoneGoodbyeTtlSeconds: 5, revisionMemorySeconds: 60, now: { 0 })
     pipeline = PayloadPipeline(
       frameOverrides: overrides,
       isActive: { [unowned self] in self.active },
       localPeerId: { PayloadPipelineTests.localId },
+      previousOwnPeerIdAge: { [unowned self] in self.previousOwnIds.contains($0) ? 60_000 : nil },
       onSighting: { [unowned self] peerId, status, _, _, rssi in
         self.events.append("peer \(peerId) status \(status) rssi \(rssi.map { "\($0)" } ?? "nil")")
       },
@@ -696,6 +699,19 @@ class PayloadPipelineTests: XCTestCase {
     pipeline.sensor(.BLE, didRead: payload(Self.localId), fromTarget: target)
 
     XCTAssertEqual(events, [])
+    // Dropped before FrameOverrides saw it, so it left nothing behind.
+    XCTAssertEqual(overrides.trackedPeerCount(), 0)
+  }
+
+  func testAPayloadWithOneOfOurEarlierIdsIsDroppedWithoutBeingRecorded() {
+    previousOwnIds = [42]
+    goodbye(42)
+    pipeline.sensor(.BLE, didMeasure: reading(-60), fromTarget: target, withPayload: payload(42))
+    pipeline.sensor(.BLE, didRead: payload(42), fromTarget: target)
+    // The case seen on hardware: a relay hands it over.
+    pipeline.sensor(.BLE, didShare: [payload(42), payload(8)], fromTarget: target)
+
+    XCTAssertEqual(events, ["peer 8 status 1 rssi nil"])
     // Dropped before FrameOverrides saw it, so it left nothing behind.
     XCTAssertEqual(overrides.trackedPeerCount(), 0)
   }
@@ -997,5 +1013,175 @@ class BridgeLogConsoleWriterTests: XCTestCase {
     XCTAssertTrue(output.contains("I native.test"), output)
     XCTAssertTrue(output.contains("E native.log"), output)
     XCTAssertTrue(output.contains("log file write failed; file logging stops"), output)
+  }
+}
+
+/// Same cases as OwnPeerIdHistoryTest.kt on Android.
+class OwnPeerIdHistoryTests: XCTestCase {
+
+  private var stored: String?
+  private var writes = 0
+  private var clock: Int64 = 1_000_000
+
+  override func setUp() {
+    super.setUp()
+    stored = nil
+    writes = 0
+    clock = 1_000_000
+  }
+
+  private func history() -> OwnPeerIdHistory {
+    OwnPeerIdHistory(
+      read: { [unowned self] in self.stored },
+      write: { [unowned self] in
+        self.stored = $0
+        self.writes += 1
+      },
+      now: { [unowned self] in self.clock })
+  }
+
+  func testANewIdMakesTheLastOnePreviousTheCurrentOneIsNot() {
+    let history = history()
+    history.noteCurrent(1)
+    XCTAssertFalse(history.isPrevious(1))
+
+    history.noteCurrent(2)
+    XCTAssertTrue(history.isPrevious(1))
+    XCTAssertFalse(history.isPrevious(2))
+    XCTAssertFalse(history.isPrevious(3))
+  }
+
+  func testTheAgeCountsFromWhenTheIdWasReplaced() {
+    let history = history()
+    history.noteCurrent(1)
+    clock += 5_000
+    history.noteCurrent(2)
+    clock += 7_000
+
+    XCTAssertEqual(history.previousAgeMillis(1), 7_000)
+    XCTAssertNil(history.previousAgeMillis(2))
+  }
+
+  func testTheSameIdAgainChangesNothing() {
+    let history = history()
+    history.noteCurrent(1)
+    history.noteCurrent(1)
+
+    XCTAssertEqual(history.previousIds(), [])
+  }
+
+  func testTheHistorySurvivesARelaunch() {
+    history().noteCurrent(1)
+    // The next launch, with a new id.
+    let next = history()
+    next.noteCurrent(2)
+    XCTAssertTrue(next.isPrevious(1))
+
+    let third = history()
+    third.noteCurrent(3)
+    XCTAssertEqual(third.previousIds(), [1, 2])
+  }
+
+  func testAnIdIsForgottenAfterTheRetention() {
+    let history = history()
+    history.noteCurrent(1)
+    history.noteCurrent(2)
+
+    clock += OwnPeerIdHistory.retentionMillis
+    XCTAssertTrue(history.isPrevious(1))
+    clock += 1
+    XCTAssertFalse(history.isPrevious(1))
+
+    // And it is pruned from storage on the next change.
+    history.noteCurrent(3)
+    XCTAssertEqual(self.history().previousIds(), [2])
+  }
+
+  func testOnlyTheNewestIdsAreKept() {
+    let history = history()
+    // Ids 0 to capacity + 1: capacity + 1 previous ones, the oldest dropped.
+    for id in 0...(OwnPeerIdHistory.capacity + 1) { history.noteCurrent(id) }
+
+    let previous = history.previousIds()
+    XCTAssertEqual(previous.count, OwnPeerIdHistory.capacity)
+    XCTAssertEqual(previous.first, 1)
+    XCTAssertEqual(previous.last, OwnPeerIdHistory.capacity)
+  }
+
+  func testAnIdThatComesBackIsCurrentNotPrevious() {
+    let history = history()
+    history.noteCurrent(1)
+    history.noteCurrent(2)
+    history.noteCurrent(1)
+
+    XCTAssertFalse(history.isPrevious(1))
+    XCTAssertEqual(history.previousIds(), [2])
+  }
+
+  func testUnreadableStorageIsIgnored() {
+    stored = "garbage"
+    history().noteCurrent(1)
+    stored = "x|1@y,2@5,,3"
+    let history = history()
+    XCTAssertEqual(history.previousIds(), [2])
+    history.noteCurrent(9)
+    XCTAssertEqual(history.previousIds(), [2])
+  }
+
+  func testIsPreviousNeverWrites() {
+    let history = history()
+    history.noteCurrent(1)
+    let before = writes
+    _ = history.isPrevious(1)
+    _ = history.previousIds()
+    XCTAssertEqual(writes, before)
+  }
+}
+
+/// Many peers pass by over a long session; their models must not pile up.
+/// Same cases as DistanceEstimatorTest.kt on Android.
+class DistanceEstimatorTests: XCTestCase {
+
+  private var clock = 0.0
+  private var estimator: DistanceEstimator!
+
+  override func setUp() {
+    super.setUp()
+    clock = 0
+    estimator = DistanceEstimator(now: { [unowned self] in self.clock })
+  }
+
+  func testAPeerThatWalkedAwayIsForgottenAfterTheModelMemory() {
+    _ = estimator.addSample(peerId: 1, rssi: -60, senderDeviceKind: 1)
+    _ = estimator.addSample(peerId: 2, rssi: -60, senderDeviceKind: 1)
+
+    clock += DistanceEstimator.modelMemorySeconds
+    _ = estimator.addSample(peerId: 2, rssi: -60, senderDeviceKind: 1)
+    XCTAssertEqual(estimator.snapshot().map { $0.peerId }.sorted(), [1, 2])
+
+    clock += 0.001
+    XCTAssertEqual(estimator.snapshot().map { $0.peerId }, [2])
+  }
+
+  func testHundredsOfPassersByLeaveOnlyTheRecentOnesBehind() {
+    for id in 0..<500 {
+      _ = estimator.addSample(peerId: id, rssi: -70, senderDeviceKind: 0)
+      clock += 1
+    }
+
+    // 500 s of one new peer a second: only about the last 120 remain.
+    XCTAssertTrue((120...131).contains(estimator.modelCount), "\(estimator.modelCount)")
+  }
+
+  func testAPeerThatComesBackAfterExpiryStartsAFreshModel() {
+    for _ in 0..<5 { _ = estimator.addSample(peerId: 1, rssi: -40, senderDeviceKind: 1) }
+    clock += DistanceEstimator.modelMemorySeconds + 20
+
+    let estimate = estimator.addSampleDetailed(peerId: 1, rssi: -90, senderDeviceKind: 1)
+    XCTAssertEqual(estimate?.samples, 1)
+    // A fresh filter seeds with its first measurement; the old one would
+    // still be pulled towards -40. (The 30 s window alone has already
+    // emptied the samples, so only this tells the two apart.)
+    XCTAssertEqual(estimate?.smoothed, -90)
   }
 }
