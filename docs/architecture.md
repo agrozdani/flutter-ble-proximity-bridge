@@ -116,6 +116,13 @@ sample, so a sighting carries a `distance` exactly when it carries an `rssi`.
 Buckets, not meters with decimals, are the honest output: BLE RSSI simply
 does not contain centimeter-level information.
 
+A peer's model is dropped on its goodbye, at a stop, and 120 s after its
+last RSSI sample. The last matters in a crowd and over long sessions: a
+peer that walks away sends no goodbye, and without it every passer-by
+would keep a model, and a line in every stats log, until the bridge stops.
+120 s is longer than Dart's longest eviction window (90 s), and a peer that
+comes back later starts a fresh model.
+
 ## Stopping is a protocol problem
 
 The hardest bug this bridge handles: **stopping a BLE stack is not a clean

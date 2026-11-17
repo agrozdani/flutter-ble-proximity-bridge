@@ -1126,3 +1126,48 @@ class OwnPeerIdHistoryTests: XCTestCase {
     XCTAssertEqual(writes, before)
   }
 }
+
+/// Many peers pass by over a long session; their models must not pile up.
+/// Same cases as DistanceEstimatorTest.kt on Android.
+class DistanceEstimatorTests: XCTestCase {
+
+  private var clock = 0.0
+  private var estimator: DistanceEstimator!
+
+  override func setUp() {
+    super.setUp()
+    clock = 0
+    estimator = DistanceEstimator(now: { [unowned self] in self.clock })
+  }
+
+  func testAPeerThatWalkedAwayIsForgottenAfterTheModelMemory() {
+    _ = estimator.addSample(peerId: 1, rssi: -60, senderDeviceKind: 1)
+    _ = estimator.addSample(peerId: 2, rssi: -60, senderDeviceKind: 1)
+
+    clock += DistanceEstimator.modelMemorySeconds
+    _ = estimator.addSample(peerId: 2, rssi: -60, senderDeviceKind: 1)
+    XCTAssertEqual(estimator.snapshot().map { $0.peerId }.sorted(), [1, 2])
+
+    clock += 0.001
+    XCTAssertEqual(estimator.snapshot().map { $0.peerId }, [2])
+  }
+
+  func testHundredsOfPassersByLeaveOnlyTheRecentOnesBehind() {
+    for id in 0..<500 {
+      _ = estimator.addSample(peerId: id, rssi: -70, senderDeviceKind: 0)
+      clock += 1
+    }
+
+    // 500 s of one new peer a second: only about the last 120 remain.
+    XCTAssertTrue((120...131).contains(estimator.modelCount), "\(estimator.modelCount)")
+  }
+
+  func testAPeerThatComesBackAfterExpiryStartsAFreshModel() {
+    for _ in 0..<5 { _ = estimator.addSample(peerId: 1, rssi: -40, senderDeviceKind: 1) }
+    clock += DistanceEstimator.modelMemorySeconds + 20
+
+    let estimate = estimator.addSampleDetailed(peerId: 1, rssi: -90, senderDeviceKind: 1)
+    XCTAssertEqual(estimate?.samples, 1)
+    XCTAssertEqual(estimate?.median, -90)
+  }
+}
