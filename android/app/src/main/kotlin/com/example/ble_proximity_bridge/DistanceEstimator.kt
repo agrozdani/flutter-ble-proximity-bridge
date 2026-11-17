@@ -17,14 +17,16 @@ class DistanceEstimator(
 
     companion object {
         /**
-         * How long a peer's model outlives its last sample. A peer that
-         * walks away sends no goodbye, so without this every passer-by's
-         * model would stay, and be listed in every stats line, until the
-         * bridge stops. Longer than Dart's longest eviction window (90 s,
-         * for Android receivers), so a model only expires once its peer has
-         * sent no RSSI reading for longer than Dart would keep a silent
-         * peer. A peer kept listed meanwhile by reads or relays alone (they
-         * carry no RSSI here) just starts a fresh model at its next reading.
+         * How long a peer's model outlives its last sample. A backstop:
+         * Dart frees the model of every peer it evicts (`forgetPeer`), but
+         * only while it is listening. When the service runs with no Dart
+         * listener, or a forgetPeer call is lost, a peer that walks away
+         * (no goodbye) would otherwise keep its model, and a line in every
+         * stats log, until the bridge stops. Longer than Dart's longest
+         * eviction window (90 s, for Android receivers), so it never
+         * expires a model before Dart would have dropped the peer for
+         * silence; a peer Dart keeps listed through payloads without RSSI
+         * just starts a fresh model at its next reading.
          */
         const val MODEL_MEMORY_MILLIS = 120_000L
 

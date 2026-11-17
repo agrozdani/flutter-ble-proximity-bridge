@@ -75,7 +75,7 @@ final class ProximityController: NSObject, FlutterStreamHandler {
     frameOverrides: frameOverrides,
     isActive: { [weak self] in self?.sourceMode == .ble },
     localPeerId: { [weak self] in self?.localPeerId },
-    isPreviousOwnPeerId: { [ownPeerIds] in ownPeerIds.isPrevious($0) },
+    previousOwnPeerIdAge: { [ownPeerIds] in ownPeerIds.previousAgeMillis($0) },
     onSighting: { [weak self] peerId, status, color, deviceKind, rssi in
       self?.handleSighting(
         peerId: peerId, status: status, color: color, deviceKind: deviceKind, rssi: rssi)

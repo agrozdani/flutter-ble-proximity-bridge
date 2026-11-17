@@ -116,12 +116,14 @@ sample, so a sighting carries a `distance` exactly when it carries an `rssi`.
 Buckets, not meters with decimals, are the honest output: BLE RSSI simply
 does not contain centimeter-level information.
 
-A peer's model is dropped on its goodbye, at a stop, and 120 s after its
-last RSSI sample. The last matters in a crowd and over long sessions: a
-peer that walks away sends no goodbye, and without it every passer-by
-would keep a model, and a line in every stats log, until the bridge stops.
-120 s is longer than Dart's longest eviction window (90 s), and a peer that
-comes back later starts a fresh model.
+A peer's model is dropped on its goodbye, at a stop, when Dart evicts the
+peer (`forgetPeer`), and, as a backstop, 120 s after its last RSSI sample.
+The backstop covers a bridge running with no Dart listener and a lost
+`forgetPeer`: there a peer that walks away (no goodbye) would otherwise
+keep its model, and a line in every stats log, until the bridge stops,
+which adds up over a long session among many passers-by. 120 s is longer
+than Dart's longest eviction window (90 s), and a peer that comes back
+later starts a fresh model.
 
 ## Stopping is a protocol problem
 
@@ -371,17 +373,20 @@ bridge:
   read of the peer. Relayed sightings also carry the *relay's* RSSI, so their
   distance is not the relayed peer's. The same path can hand a device its
   *own* older payload — the relay only skips a copy that is byte-identical
-  to the peer's current one — which is why the pipeline drops any payload
-  carrying the device's own id. After a relaunch the device has a new id,
-  and a relay that still holds the old launch's record (Herald for Android
-  keeps it up to 15 minutes, and cannot tie it to the new launch once the
-  Bluetooth address has rotated) hands the old payload over as another
-  device's. Seen on an iPad relaunched 8 minutes after its previous launch:
-  it listed that launch as a peer for about 20 s. So each device also keeps
-  the ids it broadcast as in the last 30 minutes, across launches
-  (`OwnPeerIdHistory`), and drops those too. Keeping one id across launches
-  would avoid this, but needs the payload revision counter persisted as
-  well (see `BridgeController`).
+  to the payload it last read from that peer — which is why the pipeline
+  drops any payload carrying the device's own id. After a relaunch the
+  device has a new id, and a relay that still holds the old launch's record
+  (Herald for Android keeps a record until it has not been updated for 15
+  minutes, and cannot tie it to the new launch once the Bluetooth address
+  has rotated) hands the old payload over as another device's. Seen on an
+  iPad relaunched 8 minutes after its previous launch: it listed that
+  launch as a peer for about 20 s. So each device also keeps its earlier
+  ids for 30 minutes after each was replaced, across launches
+  (`OwnPeerIdHistory`, at most 64), and drops those too. 30 minutes is a
+  margin, not a bound: what kept the iPad's old record fresh after it left
+  is not known, and the drop line logs each id's age. Keeping one id across
+  launches would avoid this, but needs the payload revision counter
+  persisted as well (see `BridgeController`).
   The same relay can hand a *third* device a relaunched peer's old id,
   which it then lists next to the new one until the relays stop. This
   follows from the mechanism but was not observed: the hardware runs had

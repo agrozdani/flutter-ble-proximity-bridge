@@ -31,6 +31,18 @@ class OwnPeerIdHistoryTest {
     }
 
     @Test
+    fun `the age counts from when the id was replaced`() {
+        val history = history()
+        history.noteCurrent(1)
+        clock += 5_000
+        history.noteCurrent(2)
+        clock += 7_000
+
+        assertEquals(7_000L, history.previousAgeMillis(1))
+        assertEquals(null, history.previousAgeMillis(2))
+    }
+
+    @Test
     fun `the same id again changes nothing`() {
         val history = history()
         history.noteCurrent(1)

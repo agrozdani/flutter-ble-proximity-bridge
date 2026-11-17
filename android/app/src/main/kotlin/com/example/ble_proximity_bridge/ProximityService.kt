@@ -170,7 +170,7 @@ class ProximityService : Service(), EventChannel.StreamHandler {
         frameOverrides,
         isActive = { sourceMode == SourceMode.BLE },
         localPeerId = { payloadSupplier?.currentPeerId() },
-        isPreviousOwnPeerId = { ownPeerIds?.isPrevious(it) == true },
+        previousOwnPeerIdAge = { ownPeerIds?.previousAgeMillis(it) },
         listener = object : PayloadPipeline.Listener {
             override fun onSighting(
                 peerId: Long,

@@ -624,7 +624,7 @@ class PayloadPipelineTests: XCTestCase {
       frameOverrides: overrides,
       isActive: { [unowned self] in self.active },
       localPeerId: { PayloadPipelineTests.localId },
-      isPreviousOwnPeerId: { [unowned self] in self.previousOwnIds.contains($0) },
+      previousOwnPeerIdAge: { [unowned self] in self.previousOwnIds.contains($0) ? 60_000 : nil },
       onSighting: { [unowned self] peerId, status, _, _, rssi in
         self.events.append("peer \(peerId) status \(status) rssi \(rssi.map { "\($0)" } ?? "nil")")
       },
@@ -1051,6 +1051,17 @@ class OwnPeerIdHistoryTests: XCTestCase {
     XCTAssertFalse(history.isPrevious(3))
   }
 
+  func testTheAgeCountsFromWhenTheIdWasReplaced() {
+    let history = history()
+    history.noteCurrent(1)
+    clock += 5_000
+    history.noteCurrent(2)
+    clock += 7_000
+
+    XCTAssertEqual(history.previousAgeMillis(1), 7_000)
+    XCTAssertNil(history.previousAgeMillis(2))
+  }
+
   func testTheSameIdAgainChangesNothing() {
     let history = history()
     history.noteCurrent(1)
@@ -1168,6 +1179,9 @@ class DistanceEstimatorTests: XCTestCase {
 
     let estimate = estimator.addSampleDetailed(peerId: 1, rssi: -90, senderDeviceKind: 1)
     XCTAssertEqual(estimate?.samples, 1)
-    XCTAssertEqual(estimate?.median, -90)
+    // A fresh filter seeds with its first measurement; the old one would
+    // still be pulled towards -40. (The 30 s window alone has already
+    // emptied the samples, so only this tells the two apart.)
+    XCTAssertEqual(estimate?.smoothed, -90)
   }
 }

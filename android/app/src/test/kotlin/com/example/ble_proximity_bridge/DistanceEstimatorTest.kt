@@ -1,6 +1,7 @@
 package com.example.ble_proximity_bridge
 
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 /**
@@ -34,7 +35,7 @@ class DistanceEstimatorTest {
 
         // 500 s of one new peer a second: only about the last 120 remain.
         val remaining = estimator.modelCount
-        assert(remaining in 120..131) { "remaining=$remaining" }
+        assertTrue("remaining=$remaining", remaining in 120..131)
     }
 
     @Test
@@ -44,6 +45,9 @@ class DistanceEstimatorTest {
 
         val estimate = estimator.addSampleDetailed(1, -90.0, 1)!!
         assertEquals(1, estimate.samples)
-        assertEquals(-90.0, estimate.median, 0.0)
+        // A fresh filter seeds with its first measurement; the old one
+        // would still be pulled towards -40. (The 30 s window alone has
+        // already emptied the samples, so only this tells the two apart.)
+        assertEquals(-90.0, estimate.smoothed, 0.0)
     }
 }

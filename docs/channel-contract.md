@@ -166,9 +166,10 @@ also reports a relayed payload as a *measured* sighting, but with the relay's
 RSSI — see [Known limitations](architecture.md#known-limitations).
 
 A device never reports itself: a payload carrying the id this device was
-started with, or one it was started with in the last 30 minutes (earlier
-launches included), is dropped natively (a relay can hand a device its own
-payload back).
+started with is dropped natively, and so is one carrying an id it was
+started with before, if that id was replaced in the last 30 minutes
+(earlier launches included, at most 64 ids). A relay can hand a device its
+own payload back.
 
 ## Wire payload (BLE)
 

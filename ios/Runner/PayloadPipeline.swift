@@ -18,7 +18,7 @@ final class PayloadPipeline: SensorDelegate {
   private let frameOverrides: FrameOverrides
   private let isActive: () -> Bool
   private let localPeerId: () -> Int?
-  private let isPreviousOwnPeerId: (Int) -> Bool
+  private let previousOwnPeerIdAge: (Int) -> Int64?
   private let onSighting:
     (_ peerId: Int, _ status: Int, _ color: Int, _ deviceKind: Int, _ rssi: Double?) -> Void
   private let onGone: (_ peerId: Int) -> Void
@@ -27,16 +27,19 @@ final class PayloadPipeline: SensorDelegate {
   private let statsLock = NSLock()
   private var counts: [(name: String, count: Int)] = []
   private var _bluetoothState: SensorState?
+  /// Earlier own ids already logged at info; at most OwnPeerIdHistory's
+  /// capacity per launch, so it stays small.
+  private var loggedPreviousOwnIds: Set<Int> = []
 
   /// `isActive` says whether outcomes are reported (a BLE source is
   /// logically running); `localPeerId` is the id this device broadcasts as;
-  /// `isPreviousOwnPeerId` says whether an id is one it broadcast as before
-  /// (see OwnPeerIdHistory).
+  /// `previousOwnPeerIdAge` says how long ago an id stopped being ours, if it
+  /// is one this device broadcast as before (see OwnPeerIdHistory).
   init(
     frameOverrides: FrameOverrides,
     isActive: @escaping () -> Bool,
     localPeerId: @escaping () -> Int?,
-    isPreviousOwnPeerId: @escaping (Int) -> Bool = { _ in false },
+    previousOwnPeerIdAge: @escaping (Int) -> Int64? = { _ in nil },
     onSighting: @escaping (Int, Int, Int, Int, Double?) -> Void,
     onGone: @escaping (Int) -> Void,
     onMalformed: @escaping (Int) -> Void = { _ in }
@@ -44,7 +47,7 @@ final class PayloadPipeline: SensorDelegate {
     self.frameOverrides = frameOverrides
     self.isActive = isActive
     self.localPeerId = localPeerId
-    self.isPreviousOwnPeerId = isPreviousOwnPeerId
+    self.previousOwnPeerIdAge = previousOwnPeerIdAge
     self.onSighting = onSighting
     self.onGone = onGone
     self.onMalformed = onMalformed
@@ -169,12 +172,20 @@ final class PayloadPipeline: SensorDelegate {
     // The same for our ids from earlier launches: a peer that has not tied
     // its record of our old launch to the new one relays the old payload to
     // us as another device's (OwnPeerIdHistory says when).
-    if isPreviousOwnPeerId(peerId) {
+    if let ageMillis = previousOwnPeerIdAge(peerId) {
       count("ownPrevious")
-      BridgeLog.d(
-        "pipeline",
-        "\(label(source)) own payload from an earlier launch \(StatusPayloadSupplier.describe(data)) "
-          + "via=\(via(target)), dropped")
+      statsLock.lock()
+      let first = loggedPreviousOwnIds.insert(peerId).inserted
+      statsLock.unlock()
+      // Once at info: how late relays of an old id come is worth knowing
+      // in release logs too (see OwnPeerIdHistory.retentionMillis).
+      let line = {
+        "\(self.label(source)) own payload from an earlier launch "
+          + "\(StatusPayloadSupplier.describe(data)), replaced "
+          + String(format: "%.1f", Double(ageMillis) / 60_000) + " min ago, "
+          + "via=\(self.via(target)), dropped"
+      }
+      if first { BridgeLog.i("pipeline", line()) } else { BridgeLog.d("pipeline", line()) }
       return
     }
 

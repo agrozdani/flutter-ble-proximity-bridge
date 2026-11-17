@@ -60,7 +60,7 @@ class PayloadPipelineTest {
         },
         onMalformed = { malformed += it },
         now = { clock },
-        isPreviousOwnPeerId = { it in previousOwnIds },
+        previousOwnPeerIdAge = { if (it in previousOwnIds) 60_000L else null },
     )
 
     private val ble = SensorType.BLE

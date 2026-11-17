@@ -36,8 +36,11 @@ class PayloadPipeline(
     private val listener: Listener,
     private val onMalformed: (size: Int) -> Unit = {},
     private val now: () -> Long = SystemClock::elapsedRealtime,
-    /** Whether an id is one this device broadcast as before; see [OwnPeerIdHistory]. */
-    private val isPreviousOwnPeerId: (Long) -> Boolean = { false },
+    /**
+     * How long ago an id stopped being ours, if it is one this device
+     * broadcast as before; see [OwnPeerIdHistory].
+     */
+    private val previousOwnPeerIdAge: (Long) -> Long? = { null },
 ) : SensorDelegate {
 
     interface Listener {
@@ -60,6 +63,12 @@ class PayloadPipeline(
         private set
 
     private val stats = Counters()
+
+    /**
+     * Earlier own ids already logged at info; at most OwnPeerIdHistory's
+     * capacity per launch, so it stays small.
+     */
+    private val loggedPreviousOwnIds = HashSet<Long>()
 
     /** The id last read from each device, by Herald target. */
     private val lastReadIds = HashMap<String, LastRead>()
@@ -172,12 +181,18 @@ class PayloadPipeline(
         // The same for our ids from earlier launches: a peer that has not
         // tied its record of our old launch to the new one relays the old
         // payload to us as another device's (OwnPeerIdHistory says when).
-        if (isPreviousOwnPeerId(peerId)) {
+        val previousAgeMillis = previousOwnPeerIdAge(peerId)
+        if (previousAgeMillis != null) {
             stats.add("ownPrevious")
-            BridgeLog.d("pipeline") {
-                "${label(source)} own payload from an earlier launch ${StatusPayloadSupplier.describe(data)} " +
+            val first = synchronized(loggedPreviousOwnIds) { loggedPreviousOwnIds.add(peerId) }
+            // Once at info: how late relays of an old id come is worth
+            // knowing in release logs too (see OwnPeerIdHistory.RETENTION_MILLIS).
+            val line = {
+                "${label(source)} own payload from an earlier launch ${StatusPayloadSupplier.describe(data)}, " +
+                    "replaced ${String.format(Locale.US, "%.1f", previousAgeMillis / 60_000.0)} min ago, " +
                     "via=${via(target)}, dropped"
             }
+            if (first) BridgeLog.i("pipeline", line()) else BridgeLog.d("pipeline", line)
             return
         }
 
