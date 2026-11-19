@@ -439,6 +439,13 @@ radio:
   errors mid-handshake or once running, a stop that cancels a start
   mid-handshake, a start issued while a stop is still tearing down, and a
   status change made while the handshake is finishing.
+- [`peers_controller_test.dart`](test/peers_controller_test.dart) covers the
+  peer list: the eviction window on each platform, and the UI throttle, which
+  still shows the last sighting of a burst.
+- [`home_screen_test.dart`](test/home_screen_test.dart) lays the home screen
+  out where its cards do not fit (a phone in landscape, a tablet with its
+  keyboard up, an accessibility text size): nothing overflows, and Start and
+  the peer list can be scrolled to.
 - [`bridge_event_test.dart`](test/bridge_event_test.dart) covers event decoding
   and its edge cases — including integer-typed measurements being widened to
   `double` (defensive: the codec itself preserves native `Double`s).
@@ -467,7 +474,13 @@ same cases on both platforms:
 - `PayloadPipelineTest.kt` / `PayloadPipelineTests` (Swift) drive the pipeline
   through Herald's own delegate callbacks (on iOS through the `SensorDelegate`
   protocol, as Herald calls them): how each callback is classified, the
-  self-sighting guard, and that frames and reads are recorded while stopped.
+  self-sighting guard (this device's current and earlier ids), and that frames
+  and reads are recorded while stopped.
+- `OwnPeerIdHistoryTest.kt` / `OwnPeerIdHistoryTests` (Swift) cover the
+  earlier ids a device keeps across launches: which id counts as earlier, how
+  long and how many are kept, and that unreadable storage is ignored.
+- `DistanceEstimatorTest.kt` / `DistanceEstimatorTests` (Swift) cover the
+  expiry of the distance models of peers that walked away.
 
 ## Adapting it for your own app
 
@@ -488,9 +501,11 @@ address when building on it:
   still remember the previous launch take the new one's payloads for older
   ones and ignore them, its goodbye included, for up to about a minute.
 
-Deliberate non-goals, which mark the boundaries of the implementation: no state
-persistence, no retry/backoff beyond resume-retry, and no Pigeon (the channels
-are hand-written to remain legible). The full list is in
+Deliberate non-goals, which mark the boundaries of the implementation: no
+persisted peer identity (the only state kept across launches is the ids this
+device started with, each until 30 minutes after it was replaced, so that
+relayed copies of them are dropped), no retry/backoff beyond resume-retry, and
+no Pigeon (the channels are hand-written to remain legible). The full list is in
 [architecture.md → What is deliberately not here](docs/architecture.md#what-is-deliberately-not-here).
 Known limitations — mostly inherited from Herald 2.2.0, such as relayed
 payloads briefly resurrecting a stopped iPhone, or Android hearing peers only

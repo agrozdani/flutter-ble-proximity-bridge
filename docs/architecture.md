@@ -436,8 +436,11 @@ bridge:
 
 ## What is deliberately *not* here
 
-- No state persistence: peer identity is per-launch, and so is the payload
-  revision counter, which starts again in every process. Persisting the peer
+- No persisted identity: peer identity is per-launch, and so is the payload
+  revision counter, which starts again in every process. (The one thing kept
+  across launches is the ids this device started with, each until 30 minutes
+  after it was replaced, and only so that relayed copies of them are dropped;
+  see [Known limitations](#known-limitations).) Persisting the peer
   id is an application concern, but an app that does it has to persist the
   counter with it (`RevisionCounter` in `StatusPayloadSupplier.kt` /
   `.swift`) and continue from its last value. Otherwise a relaunch under the
