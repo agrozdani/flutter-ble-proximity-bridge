@@ -12,11 +12,13 @@ import 'package:flutter_test/flutter_test.dart';
 /// scrolls, and Start/Stop and the peer list can always be reached.
 ///
 /// Flutter's test font is larger than the fonts devices draw with, so these
-/// check the layout, not how much room a particular device has. Each case is
-/// one where the old fixed column overflowed on a device or with a device's
-/// font (2026-11-18): an iPhone SE simulator in landscape (87 px) and at the
-/// first accessibility text size (81 px, Start cut off), a Pixel Tablet as
-/// its keyboard went down (38 px, logged on the device 2026-11-16).
+/// check the layout, not how much room a particular device has. The old
+/// fixed column overflowed in each of these cases with a device's font: an
+/// iPhone SE simulator in landscape (87 px) and at the first accessibility
+/// text size (81 px, Start partly cut off), 2026-11-18; and on the Pixel
+/// Tablet, which logged 38 px on 2026-11-16 while its keyboard went down
+/// (with Roboto, 1280x800 with a 400 px keyboard and a 24 px status bar
+/// overflows by 50 px).
 void main() {
   /// Lays the app out on a [size] screen (logical pixels) with a keyboard
   /// of [keyboard] pixels up and text scaled by [textScale], and returns the
@@ -26,10 +28,13 @@ void main() {
     Size size, {
     double keyboard = 0,
     double textScale = 1,
+    FakeViewPadding padding = FakeViewPadding.zero,
   }) async {
     tester.view.physicalSize = size;
     tester.view.devicePixelRatio = 1;
     tester.view.viewInsets = FakeViewPadding(bottom: keyboard);
+    tester.view.padding = padding;
+    tester.view.viewPadding = padding;
     tester.platformDispatcher.textScaleFactorTestValue = textScale;
     addTearDown(() {
       tester.view.reset();
@@ -85,14 +90,12 @@ void main() {
     });
   }
 
-  testWidgets('a long peer list scrolls to its last peer', (tester) async {
-    final errors = await layOut(tester, const Size(375, 667));
-    expect(errors, isEmpty);
-
+  /// Lists [count] mock peers, ids 1 to [count], all at the same distance.
+  Future<void> listPeers(WidgetTester tester, int count) async {
     final container = ProviderScope.containerOf(
       tester.element(find.byType(HomeScreen)),
     );
-    for (var id = 1; id <= 30; id++) {
+    for (var id = 1; id <= count; id++) {
       container
           .read(peersProvider.notifier)
           .applySighting(
@@ -107,6 +110,12 @@ void main() {
           );
     }
     await tester.pump();
+  }
+
+  testWidgets('a long peer list scrolls to its last peer', (tester) async {
+    final errors = await layOut(tester, const Size(375, 667));
+    expect(errors, isEmpty);
+    await listPeers(tester, 30);
     expect(tester.takeException(), isNull);
     expect(find.text('Nearby peers (30)'), findsOneWidget);
 
@@ -115,6 +124,37 @@ void main() {
     await tester.pump();
     expect(find.text('Peer 0000001E').hitTestable(), findsOneWidget);
     expect(find.byType(PeerTile), findsWidgets);
+    await close(tester);
+  });
+
+  testWidgets('the end of the list stays above the home indicator', (
+    tester,
+  ) async {
+    // An iPhone with a home indicator: 59 px status bar, 34 px at the bottom.
+    // The ListView this replaced kept its end above that inset by itself.
+    const screen = Size(393, 852);
+    final errors = await layOut(
+      tester,
+      screen,
+      padding: const FakeViewPadding(top: 59, bottom: 34),
+    );
+    expect(errors, isEmpty);
+    await listPeers(tester, 30);
+
+    // The scrollable that holds the list, whatever kind of scroll view it is.
+    final list = find.ancestor(
+      of: find.byType(PeerTile).first,
+      matching: find.byType(Scrollable),
+    );
+    await tester.drag(list.first, const Offset(0, -20000));
+    await tester.pumpAndSettle();
+    final last = tester.getRect(
+      find.ancestor(
+        of: find.text('Peer 0000001E'),
+        matching: find.byType(ListTile),
+      ),
+    );
+    expect(last.bottom, lessThanOrEqualTo(screen.height - 34));
     await close(tester);
   });
 }

@@ -183,9 +183,16 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
               ),
             )
           else
-            SliverList.builder(
-              itemCount: peers.length,
-              itemBuilder: (context, index) => PeerTile(peer: peers[index]),
+            // Ends above the home indicator or gesture bar, as the ListView
+            // this replaced did on its own.
+            SliverSafeArea(
+              top: false,
+              left: false,
+              right: false,
+              sliver: SliverList.builder(
+                itemCount: peers.length,
+                itemBuilder: (context, index) => PeerTile(peer: peers[index]),
+              ),
             ),
         ],
       ),
