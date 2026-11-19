@@ -104,10 +104,17 @@ case "$cmd" in
     label=${1:?usage: tool/android_ui.sh wait LABEL [SECONDS]}
     deadline=$((SECONDS + ${2:-10}))
     while true; do
-      bounds=$(find_label "$label")
+      # A screen uiautomator cannot read yet only means the label is not
+      # there yet: keep trying until the deadline (under set -e a failed
+      # find_label would otherwise end the script after five tries).
+      if bounds=$(find_label "$label" 2>/dev/null); then
+        unreadable=""
+      else
+        bounds="" unreadable=" (uiautomator could not read the screen)"
+      fi
       [[ -n "$bounds" ]] && break
       if ((SECONDS >= deadline)); then
-        echo "android_ui: \"$label\" did not appear" >&2
+        echo "android_ui: \"$label\" did not appear$unreadable" >&2
         exit 1
       fi
       sleep 0.5
