@@ -88,10 +88,13 @@ class PeersController extends Notifier<Map<int, Peer>> {
         existing.status != status ||
         existing.colorIndex != sighting.colorIndex ||
         existing.deviceKind != sighting.deviceKind;
+    // A sighting without a measurement (a payload read, a relay, a frame)
+    // must not make the list forget the reading the throttle is holding.
+    final measured = _withHeldMeasurement(sighting);
     if (!broadcastChanged && lastEmitted != null) {
       final sinceShown = now.difference(lastEmitted);
       if (sinceShown < _uiThrottle) {
-        _heldBack[sighting.id] = (sighting, now);
+        _heldBack[sighting.id] = (measured, now);
         _heldBackTimers[sighting.id] ??= Timer(
           // At most one window, even if the wall clock was set back.
           sinceShown.isNegative ? _uiThrottle : _uiThrottle - sinceShown,
@@ -100,8 +103,30 @@ class PeersController extends Notifier<Map<int, Peer>> {
         return;
       }
     }
-    _show(sighting, now);
+    _show(measured, now);
   }
+
+  /// [sighting], with the RSSI and distance of the sighting held back for
+  /// its peer when it has none of its own: that reading is newer than what
+  /// the list shows.
+  PeerSighting _withHeldMeasurement(PeerSighting sighting) {
+    final held = _heldBack[sighting.id]?.$1;
+    if (sighting.rssi != null || held == null || held.rssi == null) {
+      return sighting;
+    }
+    return PeerSighting(
+      id: sighting.id,
+      statusCode: sighting.statusCode,
+      colorIndex: sighting.colorIndex,
+      deviceKind: sighting.deviceKind,
+      rssi: held.rssi,
+      distance: held.distance,
+    );
+  }
+
+  /// How many peers have a sighting held back by the throttle.
+  @visibleForTesting
+  int get heldBackCount => _heldBackTimers.length;
 
   /// Puts [sighting], heard at [heardAt], in the list.
   void _show(PeerSighting sighting, DateTime heardAt) {
