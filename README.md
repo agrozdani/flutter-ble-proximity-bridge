@@ -441,11 +441,13 @@ radio:
   status change made while the handshake is finishing.
 - [`peers_controller_test.dart`](test/peers_controller_test.dart) covers the
   peer list: the eviction window on each platform, and the UI throttle, which
-  still shows the last sighting of a burst.
+  still shows the last reading of a burst, also when a read without a reading
+  follows it.
 - [`home_screen_test.dart`](test/home_screen_test.dart) lays the home screen
   out where its cards do not fit (a phone in landscape, a tablet with its
-  keyboard up, an accessibility text size): nothing overflows, and Start and
-  the peer list can be scrolled to.
+  keyboard up, an accessibility text size): nothing overflows, Start and the
+  peer list can be scrolled to, and the end of a long list stays above the
+  home indicator.
 - [`bridge_event_test.dart`](test/bridge_event_test.dart) covers event decoding
   and its edge cases — including integer-typed measurements being widened to
   `double` (defensive: the codec itself preserves native `Double`s).
@@ -502,9 +504,10 @@ address when building on it:
   ones and ignore them, its goodbye included, for up to about a minute.
 
 Deliberate non-goals, which mark the boundaries of the implementation: no
-persisted peer identity (the only state kept across launches is the ids this
-device started with, each until 30 minutes after it was replaced, so that
-relayed copies of them are dropped), no retry/backoff beyond resume-retry, and
+persisted peer identity (besides the log files, the bridge keeps only the ids
+this device started with across launches, at most 64, each until 30 minutes
+after it was replaced, so that relayed copies of them are dropped), no
+retry/backoff beyond resume-retry, and
 no Pigeon (the channels are hand-written to remain legible). The full list is in
 [architecture.md → What is deliberately not here](docs/architecture.md#what-is-deliberately-not-here).
 Known limitations — mostly inherited from Herald 2.2.0, such as relayed
