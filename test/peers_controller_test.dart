@@ -82,4 +82,151 @@ void main() {
     await pumpEventQueue();
     expect(forgotten, [7]);
   });
+
+  /// The UI throttle: at most one list update per peer per 250 ms, and the
+  /// last sighting of a burst is still shown. testWidgets, so the throttle's
+  /// timer runs on fake time.
+  group('the UI throttle', () {
+    PeerSighting reading(double rssi, {PeerStatus status = PeerStatus.busy}) =>
+        PeerSighting(
+          id: 7,
+          statusCode: status.code,
+          colorIndex: 1,
+          deviceKind: DeviceKind.ios,
+          rssi: rssi,
+          distance: rssi > -55 ? 0.5 : 1.5,
+        );
+
+    /// A container whose peer list updates are counted.
+    (ProviderContainer, PeersController, List<double?>) listen() {
+      final container = ProviderContainer();
+      final shown = <double?>[];
+      container.listen(peersProvider, (_, peers) => shown.add(peers[7]?.rssi));
+      return (container, container.read(peersProvider.notifier), shown);
+    }
+
+    testWidgets('shows the last sighting of a burst once the window ends', (
+      tester,
+    ) async {
+      final (container, peers, shown) = listen();
+      // As on a Pixel near an iPad (2026-11-16 20:28:07): a burst of
+      // readings, then about a minute of silence.
+      peers.applySighting(reading(-51));
+      peers.applySighting(reading(-66));
+      peers.applySighting(reading(-61));
+      expect(container.read(peersProvider)[7]!.rssi, -51);
+
+      await tester.pump(const Duration(milliseconds: 250));
+      final peer = container.read(peersProvider)[7]!;
+      expect(peer.rssi, -61);
+      expect(peer.distance, 1.5);
+      // Still at most one update per window: the first, then the last.
+      expect(shown, [-51, -61]);
+      container.dispose();
+    });
+
+    /// A sighting that carries no measurement (a payload read or a relay).
+    PeerSighting read({PeerStatus status = PeerStatus.busy}) => PeerSighting(
+      id: 7,
+      statusCode: status.code,
+      colorIndex: 1,
+      deviceKind: DeviceKind.ios,
+    );
+
+    testWidgets('a read inside the window keeps the reading held back', (
+      tester,
+    ) async {
+      final (container, peers, _) = listen();
+      // As on the iPad (2026-11-16 21:29:32.764/.836/.859): a read is shown,
+      // then a reading and a relayed read arrive within one window.
+      peers.applySighting(read());
+      peers.applySighting(reading(-68));
+      peers.applySighting(read());
+      expect(container.read(peersProvider)[7]!.rssi, isNull);
+
+      await tester.pump(const Duration(milliseconds: 250));
+      final peer = container.read(peersProvider)[7]!;
+      expect(peer.rssi, -68);
+      expect(peer.distance, 1.5);
+      container.dispose();
+    });
+
+    testWidgets('a change of status without a reading keeps the reading held '
+        'back', (tester) async {
+      final (container, peers, _) = listen();
+      peers.applySighting(reading(-51));
+      peers.applySighting(reading(-61));
+      peers.applySighting(read(status: PeerStatus.away));
+
+      final peer = container.read(peersProvider)[7]!;
+      expect(peer.status, PeerStatus.away);
+      expect(peer.rssi, -61);
+      expect(peers.heldBackCount, 0);
+      container.dispose();
+    });
+
+    testWidgets('a goodbye drops what was held back', (tester) async {
+      final (container, peers, _) = listen();
+      peers.applySighting(reading(-51));
+      peers.applySighting(reading(-61));
+      expect(peers.heldBackCount, 1);
+      peers.removeNow(7);
+      expect(peers.heldBackCount, 0);
+
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(container.read(peersProvider), isEmpty);
+      container.dispose();
+    });
+
+    testWidgets('an eviction drops what was held back', (tester) async {
+      final (container, peers, _) = listen();
+      peers.applySighting(reading(-51));
+      peers.applySighting(reading(-61));
+      peers.evictStale(DateTime.now().add(const Duration(minutes: 5)));
+      expect(peers.heldBackCount, 0);
+
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(container.read(peersProvider), isEmpty);
+      container.dispose();
+    });
+
+    testWidgets('a change of status shows at once and replaces what was held '
+        'back', (tester) async {
+      final (container, peers, shown) = listen();
+      peers.applySighting(reading(-51));
+      peers.applySighting(reading(-61));
+      peers.applySighting(reading(-70, status: PeerStatus.away));
+      expect(container.read(peersProvider)[7]!.status, PeerStatus.away);
+      expect(peers.heldBackCount, 0);
+
+      await tester.pump(const Duration(milliseconds: 250));
+      final peer = container.read(peersProvider)[7]!;
+      expect(peer.status, PeerStatus.away);
+      expect(peer.rssi, -70);
+      expect(shown, [-51, -70]);
+      container.dispose();
+    });
+
+    testWidgets('a stop drops what was held back', (tester) async {
+      final (container, peers, _) = listen();
+      peers.applySighting(reading(-51));
+      peers.applySighting(reading(-61));
+      peers.clear();
+      expect(peers.heldBackCount, 0);
+
+      await tester.pump(const Duration(milliseconds: 250));
+      expect(container.read(peersProvider), isEmpty);
+      container.dispose();
+    });
+
+    testWidgets('disposing the list cancels what was held back', (
+      tester,
+    ) async {
+      final (container, peers, _) = listen();
+      peers.applySighting(reading(-51));
+      peers.applySighting(reading(-61));
+      container.dispose();
+      expect(peers.heldBackCount, 0);
+    });
+  });
 }

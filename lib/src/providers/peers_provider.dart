@@ -17,8 +17,16 @@ final peersProvider = NotifierProvider<PeersController, Map<int, Peer>>(
 class PeersController extends Notifier<Map<int, Peer>> {
   /// BLE can report several sightings per second per peer. No point
   /// rebuilding the list for each one, so measurement-only updates are
-  /// throttled. A sighting that changes what the peer broadcasts always gets
-  /// through, and bookkeeping (last-seen times) happens every time.
+  /// throttled to one per peer per window. A sighting that changes what the
+  /// peer broadcasts always gets through, and bookkeeping (last-seen times)
+  /// happens every time.
+  ///
+  /// The newest sighting the throttle holds back is shown when the window
+  /// ends, unless a newer one was shown first, so the last sighting of a
+  /// burst always reaches the list. An Android receiver hears a peer in
+  /// bursts about a minute apart (docs/android.md); before, the list kept an
+  /// earlier reading of the burst until the next one (on a Pixel Tablet,
+  /// 2026-11-16: -51 dBm shown for a minute, the burst had ended at -61).
   static const Duration _uiThrottle = Duration(milliseconds: 250);
 
   /// Fallback eviction window: how long a peer may go unheard before it is
@@ -50,13 +58,21 @@ class PeersController extends Notifier<Map<int, Peer>> {
   final Map<int, DateTime> _lastSeen = {};
   final Map<int, DateTime> _lastEmitted = {};
 
+  /// Per peer: the newest sighting the throttle held back, with when it was
+  /// heard, and the timer that shows it when the window ends.
+  final Map<int, (PeerSighting, DateTime)> _heldBack = {};
+  final Map<int, Timer> _heldBackTimers = {};
+
   @override
   Map<int, Peer> build() {
     final evictionTimer = Timer.periodic(
       const Duration(seconds: 5),
       (_) => evictStale(DateTime.now()),
     );
-    ref.onDispose(evictionTimer.cancel);
+    ref.onDispose(() {
+      evictionTimer.cancel();
+      _dropAllHeldBack();
+    });
     return const {};
   }
 
@@ -72,26 +88,89 @@ class PeersController extends Notifier<Map<int, Peer>> {
         existing.status != status ||
         existing.colorIndex != sighting.colorIndex ||
         existing.deviceKind != sighting.deviceKind;
-    if (!broadcastChanged &&
-        lastEmitted != null &&
-        now.difference(lastEmitted) < _uiThrottle) {
-      return;
+    // A sighting without a measurement (a payload read, a relay, a frame)
+    // must not make the list forget the reading the throttle is holding.
+    final measured = _withHeldMeasurement(sighting);
+    if (!broadcastChanged && lastEmitted != null) {
+      final sinceShown = now.difference(lastEmitted);
+      if (sinceShown < _uiThrottle) {
+        _heldBack[sighting.id] = (measured, now);
+        _heldBackTimers[sighting.id] ??= Timer(
+          // At most one window, even if the wall clock was set back.
+          sinceShown.isNegative ? _uiThrottle : _uiThrottle - sinceShown,
+          () => _showHeldBack(sighting.id),
+        );
+        return;
+      }
     }
-    _lastEmitted[sighting.id] = now;
+    _show(measured, now);
+  }
 
+  /// [sighting], with the RSSI and distance of the sighting held back for
+  /// its peer when it has none of its own: that reading is newer than what
+  /// the list shows.
+  PeerSighting _withHeldMeasurement(PeerSighting sighting) {
+    final held = _heldBack[sighting.id]?.$1;
+    if (sighting.rssi != null || held == null || held.rssi == null) {
+      return sighting;
+    }
+    return PeerSighting(
+      id: sighting.id,
+      statusCode: sighting.statusCode,
+      colorIndex: sighting.colorIndex,
+      deviceKind: sighting.deviceKind,
+      rssi: held.rssi,
+      distance: held.distance,
+    );
+  }
+
+  /// How many peers have a sighting held back by the throttle.
+  @visibleForTesting
+  int get heldBackCount => _heldBackTimers.length;
+
+  /// Puts [sighting], heard at [heardAt], in the list.
+  void _show(PeerSighting sighting, DateTime heardAt) {
+    // Whatever the throttle held back for this peer is older.
+    _dropHeldBack(sighting.id);
+    _lastEmitted[sighting.id] = DateTime.now();
+
+    final existing = state[sighting.id];
     final peer = Peer(
       id: sighting.id,
-      status: status,
+      status: PeerStatus.fromCode(sighting.statusCode),
       colorIndex: sighting.colorIndex,
       deviceKind: sighting.deviceKind,
       // Keep the old measurement if this sighting didn't carry one.
       rssi: sighting.rssi ?? existing?.rssi,
       distance: sighting.distance ?? existing?.distance,
-      firstSeen: existing?.firstSeen ?? now,
-      lastSeen: now,
+      firstSeen: existing?.firstSeen ?? heardAt,
+      lastSeen: heardAt,
     );
     _logChange(existing, peer);
     state = {...state, sighting.id: peer};
+  }
+
+  /// The throttle window of [peerId] has ended: show what it held back,
+  /// unless the peer was removed meanwhile.
+  void _showHeldBack(int peerId) {
+    _heldBackTimers.remove(peerId);
+    final held = _heldBack.remove(peerId);
+    if (held == null || !state.containsKey(peerId)) return;
+    final (sighting, heardAt) = held;
+    _show(sighting, heardAt);
+  }
+
+  void _dropHeldBack(int peerId) {
+    _heldBack.remove(peerId);
+    _heldBackTimers.remove(peerId)?.cancel();
+  }
+
+  void _dropAllHeldBack() {
+    for (final timer in _heldBackTimers.values) {
+      timer.cancel();
+    }
+    _heldBackTimers.clear();
+    _heldBack.clear();
   }
 
   /// The peer said goodbye, or ([replaced]) its device now broadcasts another
@@ -99,6 +178,7 @@ class PeersController extends Notifier<Map<int, Peer>> {
   void removeNow(int peerId, {bool replaced = false}) {
     _lastSeen.remove(peerId);
     _lastEmitted.remove(peerId);
+    _dropHeldBack(peerId);
     final why = replaced ? 'its device has a new id' : 'goodbye';
     final peer = state[peerId];
     if (peer == null) {
@@ -118,6 +198,7 @@ class PeersController extends Notifier<Map<int, Peer>> {
     if (state.isNotEmpty) Log.i('peers', 'cleared ${state.length} peer(s)');
     _lastSeen.clear();
     _lastEmitted.clear();
+    _dropAllHeldBack();
     state = const {};
   }
 
@@ -184,6 +265,7 @@ class PeersController extends Notifier<Map<int, Peer>> {
       next.remove(id);
       _lastSeen.remove(id);
       _lastEmitted.remove(id);
+      _dropHeldBack(id);
       // Tell the native side too so it can free the distance model.
       _forget(id);
     }
