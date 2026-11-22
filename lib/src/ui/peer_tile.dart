@@ -26,32 +26,39 @@ class PeerTile extends StatelessWidget {
           if (rssi != null) '${rssi.toStringAsFixed(0)} dBm',
         ].join(' · '),
       ),
-      trailing: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          Row(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Icon(
-                switch (peer.deviceKind) {
-                  DeviceKind.ios => Icons.phone_iphone,
-                  DeviceKind.android => Icons.android,
-                  DeviceKind.unknown => Icons.device_unknown,
-                },
-                size: 16,
-                color: theme.colorScheme.outline,
-              ),
-              const SizedBox(width: 4),
-              Text(peer.distanceLabel, style: theme.textTheme.labelLarge),
-            ],
-          ),
-          if (peer.distance != null)
-            Text(
-              '~${peer.distance!.toStringAsFixed(1)} m',
-              style: theme.textTheme.bodySmall,
+      // ListTile gives its trailing widget at most 56 px of height. These two
+      // lines need more than that above about 1.55x text (every iOS
+      // accessibility size), so shrink them to fit there instead of
+      // overflowing. Below that they fit and are drawn as they are.
+      trailing: FittedBox(
+        fit: BoxFit.scaleDown,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          crossAxisAlignment: CrossAxisAlignment.end,
+          children: [
+            Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Icon(
+                  switch (peer.deviceKind) {
+                    DeviceKind.ios => Icons.phone_iphone,
+                    DeviceKind.android => Icons.android,
+                    DeviceKind.unknown => Icons.device_unknown,
+                  },
+                  size: 16,
+                  color: theme.colorScheme.outline,
+                ),
+                const SizedBox(width: 4),
+                Text(peer.distanceLabel, style: theme.textTheme.labelLarge),
+              ],
             ),
-        ],
+            if (peer.distance != null)
+              Text(
+                '~${peer.distance!.toStringAsFixed(1)} m',
+                style: theme.textTheme.bodySmall,
+              ),
+          ],
+        ),
       ),
     );
   }

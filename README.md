@@ -447,7 +447,8 @@ radio:
   out where its cards do not fit (a phone in landscape, a tablet with its
   keyboard up, an accessibility text size): nothing overflows, Start and the
   peer list can be scrolled to, and the end of a long list stays above the
-  home indicator.
+  home indicator. Peer tiles fit at iOS's first and largest accessibility
+  text sizes.
 - [`bridge_event_test.dart`](test/bridge_event_test.dart) covers event decoding
   and its edge cases — including integer-typed measurements being widened to
   `double` (defensive: the codec itself preserves native `Double`s).

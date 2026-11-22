@@ -127,6 +127,32 @@ void main() {
     await close(tester);
   });
 
+  // iOS's first and largest accessibility sizes (AX1, AX5) scale body text
+  // by 28/17 and 53/17.
+  for (final textScale in [28 / 17, 53 / 17]) {
+    testWidgets(
+      'peer tiles fit at text scale ${textScale.toStringAsFixed(2)}',
+      (tester) async {
+        final errors = await layOut(
+          tester,
+          const Size(393, 852),
+          textScale: textScale,
+        );
+        expect(errors, isEmpty);
+        await listPeers(tester, 3);
+
+        // Each tile shows its distance in two lines on the right, which
+        // ListTile gives at most 56 px of height.
+        await tester.scrollUntilVisible(find.text('Peer 00000003'), 200);
+        await tester.pump();
+        expect(find.text('Peer 00000003').hitTestable(), findsOneWidget);
+        expect(find.text('~1.5 m'), findsWidgets);
+        expect(tester.takeException(), isNull);
+        await close(tester);
+      },
+    );
+  }
+
   testWidgets('the end of the list stays above the home indicator', (
     tester,
   ) async {
