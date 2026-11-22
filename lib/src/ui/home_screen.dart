@@ -61,115 +61,139 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           _PhaseChip(phase: bridge.phase),
         ],
       ),
-      body: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: [
-          Card(
-            margin: const EdgeInsets.fromLTRB(12, 12, 12, 6),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text('Your broadcast', style: theme.textTheme.titleMedium),
-                  const SizedBox(height: 12),
-                  const StatusPicker(),
-                  if (bridge.isRunning && bridge.localPeerId != null) ...[
+      // One scroll view for the whole screen. The two cards alone are taller
+      // than some screens (an iPhone SE in portrait, a phone in landscape, a
+      // tablet with its keyboard up), and a fixed column of them left the
+      // peer list no height at all.
+      body: CustomScrollView(
+        slivers: [
+          SliverToBoxAdapter(
+            child: Card(
+              margin: const EdgeInsets.fromLTRB(12, 12, 12, 6),
+              child: Padding(
+                padding: const EdgeInsets.all(16),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('Your broadcast', style: theme.textTheme.titleMedium),
                     const SizedBox(height: 12),
-                    Text(
-                      'Broadcasting as Peer '
-                      '${bridge.localPeerId!.toRadixString(16).toUpperCase().padLeft(8, '0')}',
-                      style: theme.textTheme.bodySmall,
-                    ),
+                    const StatusPicker(),
+                    if (bridge.isRunning && bridge.localPeerId != null) ...[
+                      const SizedBox(height: 12),
+                      Text(
+                        'Broadcasting as Peer '
+                        '${bridge.localPeerId!.toRadixString(16).toUpperCase().padLeft(8, '0')}',
+                        style: theme.textTheme.bodySmall,
+                      ),
+                    ],
                   ],
+                ),
+              ),
+            ),
+          ),
+          SliverToBoxAdapter(
+            child: Card(
+              margin: const EdgeInsets.fromLTRB(12, 6, 12, 6),
+              child: Column(
+                children: [
+                  SwitchListTile(
+                    title: const Text('Mock peers'),
+                    subtitle: const Text(
+                      'Synthetic sightings — works on simulators, no '
+                      'Bluetooth or permissions needed',
+                    ),
+                    value: _mockMode,
+                    // No switching transports while running; stop first.
+                    onChanged:
+                        bridge.phase == BridgePhase.idle ||
+                            bridge.phase == BridgePhase.error
+                        ? (value) {
+                            setState(() => _mockMode = value);
+                            // Switching transport abandons a failed start, so
+                            // the resume retry can't restart the old one.
+                            if (bridge.phase == BridgePhase.error) {
+                              ref.read(bridgeProvider.notifier).stop();
+                            }
+                          }
+                        : null,
+                  ),
+                  if (bridge.error != null)
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                      child: Text(
+                        bridge.error!,
+                        style: TextStyle(color: theme.colorScheme.error),
+                      ),
+                    ),
+                  Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: switch (bridge.phase) {
+                      BridgePhase.idle ||
+                      BridgePhase.error => FilledButton.icon(
+                        onPressed: _start,
+                        icon: const Icon(Icons.radar),
+                        label: const Text('Start'),
+                      ),
+                      BridgePhase.starting => const FilledButton(
+                        onPressed: null,
+                        child: SizedBox(
+                          width: 20,
+                          height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        ),
+                      ),
+                      BridgePhase.running => FilledButton.tonalIcon(
+                        onPressed: () =>
+                            ref.read(bridgeProvider.notifier).stop(),
+                        icon: const Icon(Icons.stop),
+                        label: const Text('Stop'),
+                      ),
+                    },
+                  ),
                 ],
               ),
             ),
           ),
-          Card(
-            margin: const EdgeInsets.fromLTRB(12, 6, 12, 6),
-            child: Column(
-              children: [
-                SwitchListTile(
-                  title: const Text('Mock peers'),
-                  subtitle: const Text(
-                    'Synthetic sightings — works on simulators, no '
-                    'Bluetooth or permissions needed',
-                  ),
-                  value: _mockMode,
-                  // No switching transports while running; stop first.
-                  onChanged:
-                      bridge.phase == BridgePhase.idle ||
-                          bridge.phase == BridgePhase.error
-                      ? (value) {
-                          setState(() => _mockMode = value);
-                          // Switching transport abandons a failed start, so
-                          // the resume retry can't restart the old one.
-                          if (bridge.phase == BridgePhase.error) {
-                            ref.read(bridgeProvider.notifier).stop();
-                          }
-                        }
-                      : null,
-                ),
-                if (bridge.error != null)
-                  Padding(
-                    padding: const EdgeInsets.symmetric(horizontal: 16),
-                    child: Text(
-                      bridge.error!,
-                      style: TextStyle(color: theme.colorScheme.error),
-                    ),
-                  ),
-                Padding(
-                  padding: const EdgeInsets.all(12),
-                  child: switch (bridge.phase) {
-                    BridgePhase.idle || BridgePhase.error => FilledButton.icon(
-                      onPressed: _start,
-                      icon: const Icon(Icons.radar),
-                      label: const Text('Start'),
-                    ),
-                    BridgePhase.starting => const FilledButton(
-                      onPressed: null,
-                      child: SizedBox(
-                        width: 20,
-                        height: 20,
-                        child: CircularProgressIndicator(strokeWidth: 2),
-                      ),
-                    ),
-                    BridgePhase.running => FilledButton.tonalIcon(
-                      onPressed: () => ref.read(bridgeProvider.notifier).stop(),
-                      icon: const Icon(Icons.stop),
-                      label: const Text('Stop'),
-                    ),
-                  },
-                ),
-              ],
+          SliverToBoxAdapter(
+            child: Padding(
+              padding: const EdgeInsets.fromLTRB(20, 12, 20, 4),
+              child: Text(
+                'Nearby peers (${peers.length})',
+                style: theme.textTheme.titleMedium,
+              ),
             ),
           ),
-          Padding(
-            padding: const EdgeInsets.fromLTRB(20, 12, 20, 4),
-            child: Text(
-              'Nearby peers (${peers.length})',
-              style: theme.textTheme.titleMedium,
-            ),
-          ),
-          Expanded(
-            child: peers.isEmpty
-                ? Center(
-                    child: Text(
-                      bridge.isRunning
-                          ? 'Listening for peers…'
-                          : 'Start the bridge to discover peers',
-                      style: theme.textTheme.bodyMedium!.copyWith(
-                        color: theme.colorScheme.outline,
-                      ),
+          if (peers.isEmpty)
+            // The rest of the screen, or the text's own height when no room
+            // is left.
+            SliverFillRemaining(
+              hasScrollBody: false,
+              child: Padding(
+                padding: const EdgeInsets.symmetric(vertical: 24),
+                child: Center(
+                  child: Text(
+                    bridge.isRunning
+                        ? 'Listening for peers…'
+                        : 'Start the bridge to discover peers',
+                    style: theme.textTheme.bodyMedium!.copyWith(
+                      color: theme.colorScheme.outline,
                     ),
-                  )
-                : ListView.builder(
-                    itemCount: peers.length,
-                    itemBuilder: (context, index) =>
-                        PeerTile(peer: peers[index]),
                   ),
-          ),
+                ),
+              ),
+            )
+          else
+            // Ends above the home indicator or gesture bar, as the ListView
+            // this replaced did on its own.
+            SliverSafeArea(
+              top: false,
+              left: false,
+              right: false,
+              sliver: SliverList.builder(
+                itemCount: peers.length,
+                itemBuilder: (context, index) => PeerTile(peer: peers[index]),
+              ),
+            ),
         ],
       ),
     );

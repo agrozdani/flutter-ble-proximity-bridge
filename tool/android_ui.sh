@@ -103,11 +103,23 @@ case "$cmd" in
   wait)
     label=${1:?usage: tool/android_ui.sh wait LABEL [SECONDS]}
     deadline=$((SECONDS + ${2:-10}))
+    last_error=$(mktemp "${TMPDIR:-/tmp}/android_ui.XXXXXX")
+    trap 'rm -f "$last_error"' EXIT
     while true; do
-      bounds=$(find_label "$label")
+      # A screen uiautomator cannot read yet only means the label is not
+      # there yet: keep trying until the deadline (under set -e a failed
+      # find_label would otherwise end the script after five tries). A
+      # device that went away ends it at the first failed look, with adb's
+      # own message.
+      if ! bounds=$(find_label "$label" 2>"$last_error"); then
+        bounds=""
+        require_device
+      fi
       [[ -n "$bounds" ]] && break
       if ((SECONDS >= deadline)); then
         echo "android_ui: \"$label\" did not appear" >&2
+        # Why the last look failed, if it did.
+        cat "$last_error" >&2
         exit 1
       fi
       sleep 0.5
